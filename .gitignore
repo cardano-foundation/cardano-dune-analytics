@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+*.db
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+dist/
+*.egg-info/
+
+# Local data
+manifest.json

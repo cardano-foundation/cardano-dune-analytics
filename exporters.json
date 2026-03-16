@@ -1,0 +1,16 @@
+{
+  "exporters": [
+    {"name": "block", "pg_table": "block", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "transaction", "pg_table": "transaction", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "transaction_metadata", "pg_table": "transaction_metadata", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "transaction_scripts", "pg_table": "transaction_scripts", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "tx_input", "pg_table": "tx_input", "slot_column": "spent_at_slot", "partition_type": "daily", "group": "dune"},
+    {"name": "assets", "pg_table": "assets", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "address_utxo", "pg_table": "address_utxo_flattened", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "voting_procedure", "pg_table": "voting_procedure", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "gov_action_proposal", "pg_table": "gov_action_proposal", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
+    {"name": "reward", "pg_table": "reward", "slot_column": "earned_epoch", "partition_type": "epoch", "group": "dune"},
+    {"name": "epoch_stake", "pg_table": "epoch_stake", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"},
+    {"name": "gov_action_proposal_status", "pg_table": "gov_action_proposal_status", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"}
+  ]
+}
