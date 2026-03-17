@@ -64,6 +64,9 @@ def _expand_range(range_str: str) -> list:
 @click.option("--dry-run", is_flag=True, help="Validate only, skip uploads")
 @click.option("--skip-validation", is_flag=True, help="Skip PG validation")
 @click.option("--rebuild-tracking", is_flag=True, help="Rebuild SQLite tracking from S3")
+@click.option("--external", "external_name", type=click.Choice(["asset_data", "contract_registry"]),
+              help="Run a single external exporter")
+@click.option("--external-all", is_flag=True, help="Run all external exporters")
 @click.option("--env-file", type=str, default=".env", help="Path to .env file")
 @click.option("--exporters-file", type=str, default="exporters.json", help="Path to exporters.json")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
@@ -78,6 +81,8 @@ def main(
     dry_run,
     skip_validation,
     rebuild_tracking,
+    external_name,
+    external_all,
     env_file,
     exporters_file,
     verbose,
@@ -85,11 +90,24 @@ def main(
     """S3 upload tool for yaci-store parquet exports."""
     logger = setup_logging(verbose)
 
+    # External exporters don't need PG
+    require_pg = not (external_name or external_all)
+
     try:
-        config = load_config(env_file, exporters_file)
+        config = load_config(env_file, exporters_file, require_pg=require_pg)
     except (ValueError, FileNotFoundError) as e:
         logger.error("Configuration error: %s", e)
         sys.exit(1)
+
+    # --- External exporter path ---
+    if external_name or external_all:
+        from .orchestrator import run_external
+        if external_all:
+            names = ["asset_data", "contract_registry"]
+        else:
+            names = [external_name]
+        run_external(config=config, exporter_names=names, dry_run=dry_run)
+        return
 
     if rebuild_tracking:
         from .orchestrator import rebuild_tracking as do_rebuild
@@ -117,7 +135,7 @@ def main(
     elif run_all:
         exporter_names = list(config.exporters.keys())
     else:
-        logger.error("Specify --all, --dune, or --exporter <name>")
+        logger.error("Specify --all, --dune, --exporter <name>, --external <name>, or --external-all")
         sys.exit(1)
 
     # Build partition filter from --partition and --range

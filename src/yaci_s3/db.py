@@ -49,6 +49,29 @@ CREATE TABLE IF NOT EXISTS validation_errors (
     error_details TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS external_exporter_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exporter TEXT NOT NULL,
+    run_started_at TEXT NOT NULL,
+    run_completed_at TEXT,
+    records_fetched INTEGER,
+    records_exported INTEGER,
+    status TEXT NOT NULL DEFAULT 'running',
+    error_details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS contract_registry_state (
+    source TEXT PRIMARY KEY,
+    last_commit_sha TEXT NOT NULL,
+    last_checked_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS contract_registry_hashes (
+    script_hash TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL
+);
 """
 
 
@@ -213,6 +236,90 @@ class TrackingDB:
             )
         self.conn.commit()
         logger.info("Rebuilt uploads table with %d records", len(s3_objects))
+
+    # --- External exporter helpers ---
+
+    def get_next_suffix(self, exporter: str, date_str: str) -> int:
+        """Get the next .N suffix for an external exporter partition.
+
+        Counts existing uploads where partition_value starts with date_str
+        (e.g., '2024-01-15.1', '2024-01-15.2') and returns count + 1.
+        """
+        cursor = self.conn.execute(
+            "SELECT COUNT(*) FROM uploads WHERE exporter = ? AND partition_value LIKE ?",
+            (exporter, f"{date_str}.%"),
+        )
+        count = cursor.fetchone()[0]
+        return count + 1
+
+    def start_external_run(self, exporter: str) -> int:
+        """Record the start of an external exporter run. Returns the run ID."""
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = self.conn.execute(
+            "INSERT INTO external_exporter_runs (exporter, run_started_at, status) VALUES (?, ?, 'running')",
+            (exporter, now),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def complete_external_run(self, run_id: int, records_fetched: int,
+                              records_exported: int, status: str = "completed",
+                              error_details: str = None):
+        """Update an external exporter run as completed or failed."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """UPDATE external_exporter_runs
+               SET run_completed_at = ?, records_fetched = ?, records_exported = ?,
+                   status = ?, error_details = ?
+               WHERE id = ?""",
+            (now, records_fetched, records_exported, status, error_details, run_id),
+        )
+        self.conn.commit()
+
+    def get_contract_registry_state(self, source: str) -> Optional[str]:
+        """Get the last commit SHA for a contract registry source."""
+        cursor = self.conn.execute(
+            "SELECT last_commit_sha FROM contract_registry_state WHERE source = ?",
+            (source,),
+        )
+        row = cursor.fetchone()
+        return row["last_commit_sha"] if row else None
+
+    def update_contract_registry_state(self, source: str, commit_sha: str):
+        """Update the commit SHA for a contract registry source."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT OR REPLACE INTO contract_registry_state
+               (source, last_commit_sha, last_checked_at)
+               VALUES (?, ?, ?)""",
+            (source, commit_sha, now),
+        )
+        self.conn.commit()
+
+    def get_known_script_hashes(self) -> Set[str]:
+        """Get all known script hashes from the contract registry."""
+        cursor = self.conn.execute("SELECT script_hash FROM contract_registry_hashes")
+        return {row["script_hash"] for row in cursor.fetchall()}
+
+    def get_script_hash_sources(self) -> dict:
+        """Get mapping of script_hash -> source for priority checks."""
+        cursor = self.conn.execute("SELECT script_hash, source FROM contract_registry_hashes")
+        return {row["script_hash"]: row["source"] for row in cursor.fetchall()}
+
+    def add_script_hashes(self, hashes: List[dict]):
+        """Add new script hashes to the contract registry.
+
+        Each dict should have: script_hash, source
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        for h in hashes:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO contract_registry_hashes
+                   (script_hash, source, first_seen_at)
+                   VALUES (?, ?, ?)""",
+                (h["script_hash"], h["source"], now),
+            )
+        self.conn.commit()
 
     def close(self):
         self.conn.close()

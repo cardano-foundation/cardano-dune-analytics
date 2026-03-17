@@ -152,6 +152,63 @@ uv run yaci-s3 --rebuild-tracking
 
 This lists all objects in the S3 bucket, parses the keys to extract exporter and partition metadata, and repopulates the `uploads` table. Row count and slot range metadata is not available from S3 and will be set to defaults (0/null).
 
+### External Data Exporters
+
+External exporters fetch data from HTTP APIs (not PostgreSQL), produce parquet files, and upload to S3. They share the same S3 uploader and SQLite tracking DB but have their own fetch-write-upload cycle.
+
+**Available external exporters:**
+
+| Exporter | Source | Schedule | Description |
+|----------|--------|----------|-------------|
+| `asset_data` | Minswap API | Every 2 hours | Full snapshot of all verified Cardano tokens with price data |
+| `contract_registry` | GitHub repos | Daily | Incremental export of new smart contract script hashes |
+
+```bash
+# Run a single external exporter
+uv run yaci-s3 --external asset_data
+
+# Run all external exporters
+uv run yaci-s3 --external-all
+
+# Dry run (fetch + write parquet locally, skip S3 upload)
+uv run yaci-s3 --external asset_data --dry-run
+
+# Verbose logging
+uv run yaci-s3 --external contract_registry --verbose
+```
+
+External exporters **do not** require PostgreSQL credentials — only `S3_BUCKET` and `BASE_DATA_PATH` are needed.
+
+#### Additional Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GITHUB_TOKEN` | GitHub personal access token (raises rate limit from 60 to 5000 req/hour) | (optional) |
+| `MINSWAP_REQUEST_DELAY` | Delay in seconds between Minswap API pages | `5.0` |
+| `MINSWAP_MAX_RETRIES` | Max retries for failed Minswap API requests | `5` |
+
+#### File Naming
+
+External exporters use a `.N` suffix to allow multiple snapshots per day:
+
+- **S3 key**: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
+- **Local**: `{BASE_DATA_PATH}/{exporter}/date={YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
+- **Tracking DB partition_value**: `{YYYY-MM-DD}.{N}` (e.g., `2024-01-15.1`, `2024-01-15.2`)
+
+The suffix N is the count of existing uploads for that date + 1, queried from the tracking DB.
+
+#### Scheduling
+
+External exporters are intended to be invoked by an external scheduler (cron/systemd timer):
+
+```bash
+# asset_data every 2 hours
+0 */2 * * * cd /path/to/s3-uploader && uv run yaci-s3 --external asset_data
+
+# contract_registry daily at 6am UTC
+0 6 * * * cd /path/to/s3-uploader && uv run yaci-s3 --external contract_registry
+```
+
 ## CLI Reference
 
 | Option | Description |
@@ -166,6 +223,8 @@ This lists all objects in the S3 bucket, parses the keys to extract exporter and
 | `--dry-run` | Validate only, skip actual S3 uploads |
 | `--skip-validation` | Skip PostgreSQL validation checks |
 | `--rebuild-tracking` | Rebuild SQLite tracking DB from S3 bucket listing |
+| `--external NAME` | Run a single external exporter (`asset_data` or `contract_registry`) |
+| `--external-all` | Run all external exporters |
 | `--env-file PATH` | Path to `.env` file (default: `.env`) |
 | `--exporters-file PATH` | Path to exporters config (default: `exporters.json`) |
 | `--verbose` | Enable debug-level logging |
@@ -184,6 +243,9 @@ This lists all objects in the S3 bucket, parses the keys to extract exporter and
 | Retry one exporter's failures, skip validation | `uv run yaci-s3 --retry-failures --exporter block --skip-validation` |
 | Re-upload a single failed partition | `uv run yaci-s3 --exporter block --partition 2021-06-05 --skip-validation` |
 | Recover tracking after DB loss | `uv run yaci-s3 --rebuild-tracking` |
+| Run asset_data external exporter | `uv run yaci-s3 --external asset_data` |
+| Run all external exporters | `uv run yaci-s3 --external-all` |
+| Dry run external exporter | `uv run yaci-s3 --external asset_data --dry-run` |
 
 ## How It Works
 
@@ -213,6 +275,7 @@ Mismatches are logged to the `validation_errors` table and the partition is skip
 
 - Daily: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
 - Epoch: `{exporter}/{N}/{exporter}-epoch-{N}.parquet`
+- External: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
 
 ### SQLite Tracking Database
 
@@ -273,6 +336,47 @@ CREATE TABLE validation_errors (
     pg_max_slot     INTEGER,                -- PostgreSQL max slot
     error_details   TEXT,                    -- mismatch description
     created_at      TEXT NOT NULL            -- ISO 8601 UTC timestamp
+);
+```
+
+#### Table: `external_exporter_runs`
+
+Tracks run history for external exporters.
+
+```sql
+CREATE TABLE external_exporter_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    exporter         TEXT NOT NULL,           -- e.g. "asset_data", "contract_registry"
+    run_started_at   TEXT NOT NULL,           -- ISO 8601 UTC timestamp
+    run_completed_at TEXT,                    -- ISO 8601 UTC timestamp
+    records_fetched  INTEGER,                -- rows fetched from API
+    records_exported INTEGER,                -- rows written to parquet
+    status           TEXT NOT NULL DEFAULT 'running',  -- running, completed, failed
+    error_details    TEXT                     -- error message if failed
+);
+```
+
+#### Table: `contract_registry_state`
+
+Tracks the last processed commit SHA per GitHub source for incremental contract registry updates.
+
+```sql
+CREATE TABLE contract_registry_state (
+    source          TEXT PRIMARY KEY,        -- e.g. "stricahq", "crfa_v2", "crfa_v1"
+    last_commit_sha TEXT NOT NULL,           -- latest processed commit SHA
+    last_checked_at TEXT NOT NULL            -- ISO 8601 UTC timestamp
+);
+```
+
+#### Table: `contract_registry_hashes`
+
+Stores all known script hashes to enable incremental exports (only new hashes are exported).
+
+```sql
+CREATE TABLE contract_registry_hashes (
+    script_hash  TEXT PRIMARY KEY,          -- the contract script hash
+    source       TEXT NOT NULL,             -- which source provided it first
+    first_seen_at TEXT NOT NULL             -- ISO 8601 UTC timestamp
 );
 ```
 
@@ -357,10 +461,15 @@ src/yaci_s3/
     cli.py              # Click CLI entry point
     config.py            # .env + exporters.json loader
     models.py            # Dataclasses (ExporterDef, PartitionInfo, etc.)
-    db.py                # SQLite tracking (uploads, errors)
+    db.py                # SQLite tracking (uploads, errors, external state)
     scanner.py           # Local Hive-style partition discovery
     validator.py         # DuckDB + PG validation
     uploader.py          # S3 upload with retry + verification
-    orchestrator.py      # Main pipeline + retry logic
+    orchestrator.py      # Main pipeline + retry + external runner
     logging_setup.py     # Structured logging to stderr + file
+    external/
+        __init__.py          # External exporter registry
+        base.py              # ExternalExporter ABC (fetch -> write -> upload)
+        asset_data.py        # Minswap API client + exporter
+        contract_registry.py # GitHub client + parsers + incremental exporter
 ```

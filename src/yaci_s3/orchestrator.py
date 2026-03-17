@@ -349,6 +349,50 @@ def retry_failed(
     return summaries
 
 
+def run_external(
+    config: AppConfig,
+    exporter_names: List[str],
+    dry_run: bool = False,
+):
+    """Run external API-based exporters."""
+    from .external import EXTERNAL_EXPORTERS
+
+    pipeline_start = time.monotonic()
+    db = TrackingDB(config.sqlite_path)
+    uploader = S3Uploader(config.s3_bucket, aws_profile=config.aws_profile)
+
+    summaries = []
+    for name in exporter_names:
+        if name not in EXTERNAL_EXPORTERS:
+            logger.error("Unknown external exporter: '%s'. Available: %s",
+                         name, list(EXTERNAL_EXPORTERS.keys()))
+            continue
+
+        exporter_cls = EXTERNAL_EXPORTERS[name]
+        exporter = exporter_cls(config, db, uploader)
+        summary = exporter.run(dry_run=dry_run)
+        summaries.append(summary)
+
+    db.close()
+
+    pipeline_dur = time.monotonic() - pipeline_start
+    logger.info("=" * 70)
+    logger.info("External pipeline complete in %s. Summary:", _fmt_duration(pipeline_dur))
+    logger.info("-" * 70)
+    for s in summaries:
+        status = s.get("status", "unknown")
+        if status == "failed":
+            logger.info("  %-30s FAILED: %s", s["exporter"], s.get("error", ""))
+        else:
+            logger.info(
+                "  %-30s fetched=%-5d exported=%-5d",
+                s["exporter"], s["records_fetched"], s["records_exported"],
+            )
+    logger.info("=" * 70)
+
+    return summaries
+
+
 def rebuild_tracking(config: AppConfig):
     """Rebuild SQLite tracking DB from S3 bucket contents."""
     t0 = time.monotonic()

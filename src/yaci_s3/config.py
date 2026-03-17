@@ -25,6 +25,9 @@ class AppConfig:
     sqlite_path: str
     aws_profile: str = ""
     exporters: Dict[str, ExporterDef] = field(default_factory=dict)
+    github_token: str = ""
+    minswap_request_delay: float = 1.0
+    minswap_max_retries: int = 5
 
     @property
     def pg_dsn(self) -> str:
@@ -51,27 +54,41 @@ def load_exporters(path: str) -> Dict[str, ExporterDef]:
     return exporters
 
 
-def load_config(env_path: str = ".env", exporters_path: str = "exporters.json") -> AppConfig:
-    """Load full config from .env file and exporters.json."""
+def load_config(env_path: str = ".env", exporters_path: str = "exporters.json",
+                require_pg: bool = True) -> AppConfig:
+    """Load full config from .env file and exporters.json.
+
+    Args:
+        require_pg: If False, PG credentials are not required (for external exporters).
+    """
     load_dotenv(env_path)
 
-    required = ["PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASSWORD", "S3_BUCKET", "BASE_DATA_PATH"]
+    if require_pg:
+        required = ["PG_HOST", "PG_PORT", "PG_DB", "PG_USER", "PG_PASSWORD", "S3_BUCKET", "BASE_DATA_PATH"]
+    else:
+        required = ["S3_BUCKET", "BASE_DATA_PATH"]
+
     missing = [k for k in required if not os.getenv(k)]
     if missing:
         raise ValueError(f"Missing required env vars: {', '.join(missing)}")
 
-    exporters = load_exporters(exporters_path)
+    exporters = {}
+    if os.path.exists(exporters_path):
+        exporters = load_exporters(exporters_path)
 
     return AppConfig(
-        pg_host=os.getenv("PG_HOST"),
+        pg_host=os.getenv("PG_HOST", ""),
         pg_port=int(os.getenv("PG_PORT", "5432")),
-        pg_db=os.getenv("PG_DB"),
-        pg_user=os.getenv("PG_USER"),
-        pg_password=os.getenv("PG_PASSWORD"),
+        pg_db=os.getenv("PG_DB", ""),
+        pg_user=os.getenv("PG_USER", ""),
+        pg_password=os.getenv("PG_PASSWORD", ""),
         pg_schema=os.getenv("PG_SCHEMA", "public"),
         s3_bucket=os.getenv("S3_BUCKET"),
         base_data_path=os.getenv("BASE_DATA_PATH"),
         sqlite_path=os.getenv("SQLITE_PATH", "./uploads.db"),
         aws_profile=os.getenv("AWS_PROFILE", ""),
         exporters=exporters,
+        github_token=os.getenv("GITHUB_TOKEN", ""),
+        minswap_request_delay=float(os.getenv("MINSWAP_REQUEST_DELAY", "1.0")),
+        minswap_max_retries=int(os.getenv("MINSWAP_MAX_RETRIES", "5")),
     )

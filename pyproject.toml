@@ -9,6 +9,8 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "duckdb>=1.0",
     "boto3>=1.34",
+    "requests>=2.31",
+    "pyarrow>=14.0",
 ]
 
 [project.scripts]
