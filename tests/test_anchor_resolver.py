@@ -1,6 +1,7 @@
 """Tests for Blockfrost-based DRep metadata resolver."""
 
 import json
+import time
 from unittest.mock import patch, MagicMock
 
 import requests
@@ -9,6 +10,7 @@ from yaci_s3.internal.anchor_resolver import (
     resolve_via_blockfrost,
     resolve_batch,
     AnchorResult,
+    _RateLimiter,
 )
 
 MOCK_PROJECT_ID = "test_project_id"
@@ -72,14 +74,35 @@ def test_resolve_404_no_metadata(mock_get):
     assert result.error == "no metadata"
 
 
+@patch("yaci_s3.internal.anchor_resolver.time.sleep")
 @patch(PATCH_GET)
-def test_resolve_429_rate_limited(mock_get):
+def test_resolve_429_retries_then_succeeds(mock_get, mock_sleep):
+    """429 should retry with backoff and succeed if subsequent attempt works."""
+    mock_get.side_effect = [
+        _mock_response(status_code=429),
+        _mock_response({
+            "url": "https://example.com/meta.json",
+            "json_metadata": {"body": {"givenName": "Alice DRep"}},
+        }),
+    ]
+
+    result = resolve_via_blockfrost("drep1abc", MOCK_PROJECT_ID, timeout=5)
+    assert result.success
+    assert result.drep_name == "Alice DRep"
+    assert mock_get.call_count == 2
+    mock_sleep.assert_called_once_with(2)  # 2^1 backoff
+
+
+@patch("yaci_s3.internal.anchor_resolver.time.sleep")
+@patch(PATCH_GET)
+def test_resolve_429_exhausts_retries(mock_get, mock_sleep):
+    """429 on all attempts should return rate limited error."""
     mock_get.return_value = _mock_response(status_code=429)
 
     result = resolve_via_blockfrost("drep1abc", MOCK_PROJECT_ID, timeout=5)
     assert not result.success
-    assert result.http_status == 429
     assert result.error == "rate limited"
+    assert mock_get.call_count == 3  # MAX_RETRIES = 3
 
 
 @patch(PATCH_GET)
@@ -120,6 +143,17 @@ def test_resolve_no_json_metadata(mock_get):
     result = resolve_via_blockfrost("drep1abc", MOCK_PROJECT_ID, timeout=5)
     assert not result.success
     assert "no givenName" in result.error
+
+
+def test_rate_limiter_burst():
+    """Rate limiter should allow burst requests immediately."""
+    limiter = _RateLimiter(rate=10, burst=5)
+    start = time.monotonic()
+    for _ in range(5):
+        limiter.acquire()
+    elapsed = time.monotonic() - start
+    # 5 burst requests should complete nearly instantly (< 0.5s)
+    assert elapsed < 0.5
 
 
 @patch("yaci_s3.internal.anchor_resolver.resolve_via_blockfrost")
