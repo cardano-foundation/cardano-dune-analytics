@@ -18,7 +18,7 @@ def _make_config(base_path, db_path=":memory:"):
     return AppConfig(
         pg_host="", pg_port=5432, pg_db="", pg_user="", pg_password="",
         pg_schema="public", s3_bucket="test", base_data_path=base_path,
-        sqlite_path=db_path, anchor_timeout=2, ipfs_gateway="https://ipfs.io/ipfs/",
+        sqlite_path=db_path, blockfrost_project_id="test_project_id",
         anchor_max_workers=2,
     )
 

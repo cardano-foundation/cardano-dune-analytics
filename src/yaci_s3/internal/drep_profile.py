@@ -149,7 +149,7 @@ def _build_profiles(
         })
 
     # Determine which dreps need resolution
-    dreps_to_resolve = {}  # drep_id -> {urls: [...], newest_reg: {...}}
+    dreps_to_resolve = {}  # drep_id -> newest_reg
     dreps_no_url = {}      # drep_id -> newest_reg
 
     for drep_id, regs in drep_regs.items():
@@ -160,20 +160,16 @@ def _build_profiles(
         if ex and ex.get("source_block") is not None and newest["block"] <= ex["source_block"]:
             continue
 
-        # Collect candidate anchor URLs (non-empty, ordered newest first)
-        candidate_urls = []
-        for reg in regs:
-            url = reg.get("anchor_url")
-            if url and isinstance(url, str) and url.strip():
-                candidate_urls.append(url.strip())
+        # Check if any registration has an anchor URL
+        has_url = any(
+            reg.get("anchor_url") and isinstance(reg["anchor_url"], str) and reg["anchor_url"].strip()
+            for reg in regs
+        )
 
-        if not candidate_urls:
+        if not has_url:
             dreps_no_url[drep_id] = newest
         else:
-            dreps_to_resolve[drep_id] = {
-                "urls": candidate_urls,
-                "newest_reg": newest,
-            }
+            dreps_to_resolve[drep_id] = newest
 
     logger.info(
         "Profile update: %d dreps to resolve, %d with no URL, %d unchanged",
@@ -186,23 +182,20 @@ def _build_profiles(
                      len(dreps_to_resolve), len(dreps_no_url))
         return existing
 
-    # Resolve anchor URLs in parallel
+    # Resolve metadata via Blockfrost in parallel
     profiles = dict(existing)
 
     if dreps_to_resolve:
-        url_map = {did: info["urls"] for did, info in dreps_to_resolve.items()}
         results = resolve_batch(
-            url_map,
-            timeout=config.anchor_timeout,
-            ipfs_gateway=config.ipfs_gateway,
+            list(dreps_to_resolve.keys()),
+            project_id=config.blockfrost_project_id,
             max_workers=config.anchor_max_workers,
         )
 
         success_count = 0
         fail_count = 0
         for drep_id, anchor_result in results.items():
-            info = dreps_to_resolve[drep_id]
-            newest = info["newest_reg"]
+            newest = dreps_to_resolve[drep_id]
 
             if anchor_result.success:
                 profiles[drep_id] = {

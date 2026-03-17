@@ -27,9 +27,8 @@ cp .env.example .env
 | `AWS_PROFILE` | AWS CLI profile name for credentials | (optional) |
 | `BASE_DATA_PATH` | Local path to parquet exports | (required) |
 | `SQLITE_PATH` | Path to tracking database | `./uploads.db` |
-| `ANCHOR_RESOLVE_TIMEOUT` | HTTP timeout (seconds) for DRep anchor URL resolution | `10` |
-| `IPFS_GATEWAY` | IPFS gateway URL for resolving `ipfs://` anchor URLs | `https://ipfs.io/ipfs/` |
-| `ANCHOR_MAX_WORKERS` | Max parallel threads for anchor URL resolution | `5` |
+| `BLOCKFROST_PROJECT_ID` | Blockfrost API project ID for DRep metadata resolution | (required for drep_profile) |
+| `ANCHOR_MAX_WORKERS` | Max parallel threads for DRep metadata resolution | `5` |
 
 ### `exporters.json`
 
@@ -184,7 +183,7 @@ External exporters **do not** require PostgreSQL credentials — only `S3_BUCKET
 
 ### DRep Profile (Internal Job)
 
-The DRep profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/drep_profile/drep_profile.parquet` containing one row per `drep_id` with resolved metadata (name, anchor URL) from CIP-119 anchor JSON files. This is used by the `drep_dist_enriched` hybrid exporter.
+The DRep profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/drep_profile/drep_profile.parquet` containing one row per `drep_id` with resolved metadata (name, anchor URL) via the Blockfrost API. This is used by the `drep_dist_enriched` hybrid exporter.
 
 **Profile schema:**
 
@@ -205,10 +204,9 @@ The DRep profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/
 | `updated_at` | string | ISO timestamp of last profile update |
 
 **Update logic:**
-- For each `drep_id`, tries anchor URLs newest-first (highest block) until one resolves with a `givenName`
-- Never overwrites a good profile with a failed resolution — keeps the existing name if all new URLs fail
+- For each `drep_id`, queries Blockfrost's `/governance/dreps/{drep_id}/metadata` endpoint which returns the resolved `givenName`
+- Never overwrites a good profile with a failed resolution — keeps the existing name if new resolution fails
 - New dreps with no anchor URL get `fetch_status=no_url`
-- SSRF protection: blocks private IPs, non-HTTP schemes, and caps response size at 1MB
 
 ```bash
 # Rebuild from scratch (all historical drep_registration files)
@@ -563,7 +561,7 @@ src/yaci_s3/
         contract_registry.py # GitHub client + parsers + incremental exporter
     internal/
         __init__.py          # Internal job registry
-        anchor_resolver.py   # CIP-119 anchor URL resolver (IPFS, SSRF protection)
+        anchor_resolver.py   # Blockfrost-based DRep metadata resolver
         drep_profile.py      # DRep profile builder (DuckDB + anchor resolution)
     hybrid/
         __init__.py          # Hybrid exporter registry
