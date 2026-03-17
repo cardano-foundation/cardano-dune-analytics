@@ -393,6 +393,83 @@ def run_external(
     return summaries
 
 
+def run_internal(
+    config: AppConfig,
+    job_name: str,
+    rebuild: bool = False,
+    dates: Optional[List[str]] = None,
+    dry_run: bool = False,
+):
+    """Run an internal job (e.g., drep_profile)."""
+    from .internal import INTERNAL_JOBS
+
+    if job_name not in INTERNAL_JOBS:
+        logger.error("Unknown internal job: '%s'. Available: %s",
+                      job_name, list(INTERNAL_JOBS.keys()))
+        return None
+
+    pipeline_start = time.monotonic()
+    job_cls = INTERNAL_JOBS[job_name]
+    job = job_cls(config)
+    summary = job.run(rebuild=rebuild, dates=dates, dry_run=dry_run)
+
+    pipeline_dur = time.monotonic() - pipeline_start
+    logger.info("=" * 70)
+    logger.info("Internal job '%s' complete in %s", job_name, _fmt_duration(pipeline_dur))
+    if summary:
+        for k, v in summary.items():
+            if k not in ("job",):
+                logger.info("  %-25s %s", k, v)
+    logger.info("=" * 70)
+
+    return summary
+
+
+def run_hybrid(
+    config: AppConfig,
+    exporter_names: List[str],
+    dry_run: bool = False,
+    partition_filter: Optional[set] = None,
+):
+    """Run hybrid exporters."""
+    from .hybrid import HYBRID_EXPORTERS
+
+    pipeline_start = time.monotonic()
+    db = TrackingDB(config.sqlite_path)
+    uploader = S3Uploader(config.s3_bucket, aws_profile=config.aws_profile)
+
+    summaries = []
+    for name in exporter_names:
+        if name not in HYBRID_EXPORTERS:
+            logger.error("Unknown hybrid exporter: '%s'. Available: %s",
+                          name, list(HYBRID_EXPORTERS.keys()))
+            continue
+
+        exporter_cls = HYBRID_EXPORTERS[name]
+        exporter = exporter_cls(config, db, uploader)
+        summary = exporter.run(dry_run=dry_run, partition_filter=partition_filter)
+        summaries.append(summary)
+
+    db.close()
+
+    pipeline_dur = time.monotonic() - pipeline_start
+    logger.info("=" * 70)
+    logger.info("Hybrid pipeline complete in %s. Summary:", _fmt_duration(pipeline_dur))
+    logger.info("-" * 70)
+    for s in summaries:
+        status = s.get("status", "unknown")
+        if status == "failed":
+            logger.info("  %-30s FAILED: %s", s["exporter"], s.get("error", ""))
+        else:
+            logger.info(
+                "  %-30s scanned=%-3d enriched=%-3d uploaded=%-3d errors=%-3d",
+                s["exporter"], s["scanned"], s["enriched"], s["uploaded"], s["errors"],
+            )
+    logger.info("=" * 70)
+
+    return summaries
+
+
 def rebuild_tracking(config: AppConfig):
     """Rebuild SQLite tracking DB from S3 bucket contents."""
     t0 = time.monotonic()

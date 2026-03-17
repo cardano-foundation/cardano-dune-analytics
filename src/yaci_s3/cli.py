@@ -67,6 +67,18 @@ def _expand_range(range_str: str) -> list:
 @click.option("--external", "external_name", type=click.Choice(["asset_data", "contract_registry"]),
               help="Run a single external exporter")
 @click.option("--external-all", is_flag=True, help="Run all external exporters")
+@click.option("--hybrid", "hybrid_name", type=str, default=None,
+              help="Run a single hybrid exporter (e.g. drep_dist_enriched)")
+@click.option("--hybrid-all", is_flag=True, help="Run all hybrid exporters")
+@click.option("--internal", "internal_name", type=str, default=None,
+              help="Run an internal job (e.g. drep_profile)")
+@click.option("--rebuild", is_flag=True, help="Rebuild from scratch (for internal jobs)")
+@click.option("--date", "single_date", type=str, default=None,
+              help="Process a specific date (for internal jobs, YYYY-MM-DD)")
+@click.option("--start-date", type=str, default=None,
+              help="Start date for internal job date range (YYYY-MM-DD)")
+@click.option("--end-date", type=str, default=None,
+              help="End date for internal job date range (YYYY-MM-DD)")
 @click.option("--env-file", type=str, default=".env", help="Path to .env file")
 @click.option("--exporters-file", type=str, default="exporters.json", help="Path to exporters.json")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
@@ -83,6 +95,13 @@ def main(
     rebuild_tracking,
     external_name,
     external_all,
+    hybrid_name,
+    hybrid_all,
+    internal_name,
+    rebuild,
+    single_date,
+    start_date,
+    end_date,
     env_file,
     exporters_file,
     verbose,
@@ -90,14 +109,63 @@ def main(
     """S3 upload tool for yaci-store parquet exports."""
     logger = setup_logging(verbose)
 
-    # External exporters don't need PG
-    require_pg = not (external_name or external_all)
+    # External/hybrid/internal exporters don't need PG
+    require_pg = not (external_name or external_all or hybrid_name or hybrid_all or internal_name)
 
     try:
         config = load_config(env_file, exporters_file, require_pg=require_pg)
     except (ValueError, FileNotFoundError) as e:
         logger.error("Configuration error: %s", e)
         sys.exit(1)
+
+    # --- Internal job path ---
+    if internal_name:
+        from .orchestrator import run_internal
+        dates = None
+        if single_date:
+            dates = [single_date]
+        elif start_date and end_date:
+            try:
+                sd = date.fromisoformat(start_date)
+                ed = date.fromisoformat(end_date)
+            except ValueError:
+                logger.error("Invalid date format. Use YYYY-MM-DD")
+                sys.exit(1)
+            if sd > ed:
+                logger.error("start-date must be <= end-date")
+                sys.exit(1)
+            dates = []
+            current = sd
+            while current <= ed:
+                dates.append(current.isoformat())
+                current += timedelta(days=1)
+        elif not rebuild:
+            logger.error("Internal job requires --rebuild, --date, or --start-date/--end-date")
+            sys.exit(1)
+        run_internal(config=config, job_name=internal_name, rebuild=rebuild, dates=dates, dry_run=dry_run)
+        return
+
+    # --- Hybrid exporter path ---
+    if hybrid_name or hybrid_all:
+        from .orchestrator import run_hybrid
+        if hybrid_all:
+            from .hybrid import HYBRID_EXPORTERS
+            names = list(HYBRID_EXPORTERS.keys())
+        else:
+            names = [hybrid_name]
+
+        partition_filter_h = set(partitions) if partitions else set()
+        if partition_range:
+            try:
+                expanded = _expand_range(partition_range)
+                partition_filter_h.update(expanded)
+            except click.BadParameter as e:
+                logger.error("Invalid --range: %s", e.format_message())
+                sys.exit(1)
+        partition_filter_h = partition_filter_h if partition_filter_h else None
+
+        run_hybrid(config=config, exporter_names=names, dry_run=dry_run, partition_filter=partition_filter_h)
+        return
 
     # --- External exporter path ---
     if external_name or external_all:
@@ -135,7 +203,7 @@ def main(
     elif run_all:
         exporter_names = list(config.exporters.keys())
     else:
-        logger.error("Specify --all, --dune, --exporter <name>, --external <name>, or --external-all")
+        logger.error("Specify --all, --dune, --exporter, --external, --external-all, --hybrid, --hybrid-all, or --internal")
         sys.exit(1)
 
     # Build partition filter from --partition and --range

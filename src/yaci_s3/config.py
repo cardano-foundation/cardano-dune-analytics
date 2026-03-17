@@ -28,6 +28,9 @@ class AppConfig:
     github_token: str = ""
     minswap_request_delay: float = 1.0
     minswap_max_retries: int = 5
+    anchor_timeout: int = 10
+    ipfs_gateway: str = "https://ipfs.io/ipfs/"
+    anchor_max_workers: int = 5
 
     @property
     def pg_dsn(self) -> str:
@@ -91,4 +94,7 @@ def load_config(env_path: str = ".env", exporters_path: str = "exporters.json",
         github_token=os.getenv("GITHUB_TOKEN", ""),
         minswap_request_delay=float(os.getenv("MINSWAP_REQUEST_DELAY", "1.0")),
         minswap_max_retries=int(os.getenv("MINSWAP_MAX_RETRIES", "5")),
+        anchor_timeout=int(os.getenv("ANCHOR_RESOLVE_TIMEOUT", "10")),
+        ipfs_gateway=os.getenv("IPFS_GATEWAY", "https://ipfs.io/ipfs/"),
+        anchor_max_workers=int(os.getenv("ANCHOR_MAX_WORKERS", "5")),
     )

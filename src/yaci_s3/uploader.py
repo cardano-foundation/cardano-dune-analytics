@@ -55,9 +55,10 @@ class S3Uploader:
             multipart_threshold=MULTIPART_THRESHOLD,
         )
 
-    def upload(self, partition: PartitionInfo, dry_run: bool = False) -> Optional[str]:
+    def upload(self, partition: PartitionInfo, dry_run: bool = False,
+               s3_key_override: Optional[str] = None) -> Optional[str]:
         """Upload a parquet file to S3. Returns the S3 key on success, None on failure."""
-        s3_key = _build_s3_key(partition)
+        s3_key = s3_key_override or _build_s3_key(partition)
 
         if dry_run:
             logger.info("[DRY RUN] Would upload %s -> s3://%s/%s", partition.file_path, self.bucket, s3_key)
