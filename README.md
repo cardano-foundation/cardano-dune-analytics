@@ -27,6 +27,9 @@ cp .env.example .env
 | `AWS_PROFILE` | AWS CLI profile name for credentials | (optional) |
 | `BASE_DATA_PATH` | Local path to parquet exports | (required) |
 | `SQLITE_PATH` | Path to tracking database | `./uploads.db` |
+| `ANCHOR_RESOLVE_TIMEOUT` | HTTP timeout (seconds) for DRep anchor URL resolution | `10` |
+| `IPFS_GATEWAY` | IPFS gateway URL for resolving `ipfs://` anchor URLs | `https://ipfs.io/ipfs/` |
+| `ANCHOR_MAX_WORKERS` | Max parallel threads for anchor URL resolution | `5` |
 
 ### `exporters.json`
 
@@ -179,6 +182,76 @@ uv run yaci-s3 --external contract_registry --verbose
 
 External exporters **do not** require PostgreSQL credentials — only `S3_BUCKET` and `BASE_DATA_PATH` are needed.
 
+### DRep Profile (Internal Job)
+
+The DRep profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/drep_profile/drep_profile.parquet` containing one row per `drep_id` with resolved metadata (name, anchor URL) from CIP-119 anchor JSON files. This is used by the `drep_dist_enriched` hybrid exporter.
+
+**Profile schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `drep_id` | string | DRep identifier (primary key) |
+| `drep_hash` | string | DRep credential hash |
+| `anchor_url` | string | Working anchor URL that resolved successfully |
+| `anchor_hash` | string | Hash of the anchor content |
+| `drep_name` | string | `body.givenName` from anchor JSON |
+| `source_block` | int64 | Block height of the registration row used |
+| `source_slot` | int64 | Slot of the registration row used |
+| `source_tx_hash` | string | Tx hash of the registration row used |
+| `source_date` | string | Date partition the registration came from |
+| `fetch_status` | string | `success`, `failed`, `no_url`, or `pending` |
+| `http_status` | int32 | HTTP status code from the fetch |
+| `last_checked_at` | string | ISO timestamp of last resolution attempt |
+| `updated_at` | string | ISO timestamp of last profile update |
+
+**Update logic:**
+- For each `drep_id`, tries anchor URLs newest-first (highest block) until one resolves with a `givenName`
+- Never overwrites a good profile with a failed resolution — keeps the existing name if all new URLs fail
+- New dreps with no anchor URL get `fetch_status=no_url`
+- SSRF protection: blocks private IPs, non-HTTP schemes, and caps response size at 1MB
+
+```bash
+# Rebuild from scratch (all historical drep_registration files)
+uv run yaci-s3 --internal drep_profile --rebuild
+
+# Update from a specific day's registration data
+uv run yaci-s3 --internal drep_profile --date 2024-01-15
+
+# Update from a date range
+uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-01-31
+
+# Dry run (show what would change, don't write)
+uv run yaci-s3 --internal drep_profile --rebuild --dry-run
+```
+
+### Hybrid Exporters
+
+Hybrid exporters join local parquet data sources to produce enriched output and upload to S3. They scan source exporter partitions, skip already-uploaded ones, enrich via joins, and upload the result.
+
+**Available hybrid exporters:**
+
+| Exporter | Source | Join With | Added Columns |
+|----------|--------|-----------|---------------|
+| `drep_dist_enriched` | `drep_dist` (epoch) | `drep_profile.parquet` | `anchor_url`, `drep_name` |
+
+**Output S3 path:** `drep_dist_enriched/{epoch}/drep_dist_enriched-epoch-{epoch}.parquet`
+
+```bash
+# Enrich all new drep_dist epochs and upload
+uv run yaci-s3 --hybrid drep_dist_enriched
+
+# Enrich a specific epoch
+uv run yaci-s3 --hybrid drep_dist_enriched --partition 611
+
+# Run all hybrid exporters
+uv run yaci-s3 --hybrid-all
+
+# Dry run (enrich + write locally, skip S3 upload)
+uv run yaci-s3 --hybrid drep_dist_enriched --dry-run
+```
+
+Hybrid exporters **do not** require PostgreSQL credentials.
+
 #### Additional Environment Variables
 
 | Variable | Description | Default |
@@ -225,6 +298,13 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | `--rebuild-tracking` | Rebuild SQLite tracking DB from S3 bucket listing |
 | `--external NAME` | Run a single external exporter (`asset_data` or `contract_registry`) |
 | `--external-all` | Run all external exporters |
+| `--hybrid NAME` | Run a single hybrid exporter (e.g. `drep_dist_enriched`) |
+| `--hybrid-all` | Run all hybrid exporters |
+| `--internal NAME` | Run an internal job (e.g. `drep_profile`) |
+| `--rebuild` | Rebuild from scratch (for internal jobs) |
+| `--date YYYY-MM-DD` | Process a specific date (for internal jobs) |
+| `--start-date YYYY-MM-DD` | Start date for internal job date range |
+| `--end-date YYYY-MM-DD` | End date for internal job date range |
 | `--env-file PATH` | Path to `.env` file (default: `.env`) |
 | `--exporters-file PATH` | Path to exporters config (default: `exporters.json`) |
 | `--verbose` | Enable debug-level logging |
@@ -246,6 +326,14 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | Run asset_data external exporter | `uv run yaci-s3 --external asset_data` |
 | Run all external exporters | `uv run yaci-s3 --external-all` |
 | Dry run external exporter | `uv run yaci-s3 --external asset_data --dry-run` |
+| Build DRep profile from scratch | `uv run yaci-s3 --internal drep_profile --rebuild` |
+| Update DRep profile for one day | `uv run yaci-s3 --internal drep_profile --date 2024-01-15` |
+| Update DRep profile for date range | `uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-01-31` |
+| Dry run profile rebuild | `uv run yaci-s3 --internal drep_profile --rebuild --dry-run` |
+| Enrich all new drep_dist epochs | `uv run yaci-s3 --hybrid drep_dist_enriched` |
+| Enrich a specific epoch | `uv run yaci-s3 --hybrid drep_dist_enriched --partition 611` |
+| Run all hybrid exporters | `uv run yaci-s3 --hybrid-all` |
+| Dry run hybrid exporter | `uv run yaci-s3 --hybrid drep_dist_enriched --dry-run` |
 
 ## How It Works
 
@@ -276,6 +364,7 @@ Mismatches are logged to the `validation_errors` table and the partition is skip
 - Daily: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
 - Epoch: `{exporter}/{N}/{exporter}-epoch-{N}.parquet`
 - External: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
+- Hybrid: `{exporter}/{N}/{exporter}-epoch-{N}.parquet`
 
 ### SQLite Tracking Database
 
@@ -472,4 +561,12 @@ src/yaci_s3/
         base.py              # ExternalExporter ABC (fetch -> write -> upload)
         asset_data.py        # Minswap API client + exporter
         contract_registry.py # GitHub client + parsers + incremental exporter
+    internal/
+        __init__.py          # Internal job registry
+        anchor_resolver.py   # CIP-119 anchor URL resolver (IPFS, SSRF protection)
+        drep_profile.py      # DRep profile builder (DuckDB + anchor resolution)
+    hybrid/
+        __init__.py          # Hybrid exporter registry
+        base.py              # HybridExporter ABC (scan + enrich + upload)
+        drep_dist_enriched.py # Join drep_dist with drep_profile
 ```
