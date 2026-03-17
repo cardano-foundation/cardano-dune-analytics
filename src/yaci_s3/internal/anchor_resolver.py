@@ -78,7 +78,8 @@ def resolve_anchor(url: str, timeout: int = 10, ipfs_gateway: str = "https://ipf
             return result
 
         # Read with size cap to prevent OOM from large responses
-        content = resp.raw.read(MAX_RESPONSE_BYTES + 1)
+        # decode_content=True handles gzip/deflate transfer encoding
+        content = resp.raw.read(MAX_RESPONSE_BYTES + 1, decode_content=True)
         resp.close()
         if len(content) > MAX_RESPONSE_BYTES:
             result.error = "response too large"
