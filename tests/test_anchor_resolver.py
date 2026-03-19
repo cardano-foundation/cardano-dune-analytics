@@ -8,8 +8,11 @@ import requests
 
 from yaci_s3.internal.anchor_resolver import (
     resolve_via_blockfrost,
+    resolve_pool_metadata,
     resolve_batch,
+    resolve_pool_batch,
     AnchorResult,
+    PoolMetadataResult,
     _RateLimiter,
 )
 
@@ -167,3 +170,69 @@ def test_resolve_batch(mock_resolve):
     assert len(results) == 2
     assert results["drep1abc"].drep_name == "Alice"
     assert results["drep2def"].drep_name == "Bob"
+
+
+# --- Pool metadata tests ---
+
+@patch(PATCH_GET)
+def test_resolve_pool_metadata_success(mock_get):
+    mock_get.return_value = _mock_response({
+        "pool_id": "pool1abc",
+        "hex": "d2f12c2f3094ed07",
+        "url": "https://example.com/poolmeta.json",
+        "hash": "abc123",
+        "ticker": "TAPSY",
+        "name": "TapTap Vienna",
+        "description": "low fees",
+        "homepage": "https://tap-ada.github.io",
+    })
+
+    result = resolve_pool_metadata("d2f12c2f3094ed07", MOCK_PROJECT_ID, timeout=5)
+    assert result.success
+    assert result.ticker == "TAPSY"
+    assert result.name == "TapTap Vienna"
+    assert result.description == "low fees"
+    assert result.homepage == "https://tap-ada.github.io"
+    assert result.metadata_url == "https://example.com/poolmeta.json"
+    assert result.http_status == 200
+
+
+@patch(PATCH_GET)
+def test_resolve_pool_metadata_404(mock_get):
+    mock_get.return_value = _mock_response(status_code=404)
+
+    result = resolve_pool_metadata("deadbeef", MOCK_PROJECT_ID, timeout=5)
+    assert not result.success
+    assert result.http_status == 404
+    assert result.error == "no metadata"
+
+
+@patch(PATCH_GET)
+def test_resolve_pool_metadata_no_ticker_no_name(mock_get):
+    mock_get.return_value = _mock_response({
+        "pool_id": "pool1abc",
+        "hex": "d2f12c2f3094ed07",
+        "url": "https://example.com/poolmeta.json",
+        "hash": "abc123",
+        "ticker": None,
+        "name": None,
+        "description": None,
+        "homepage": None,
+    })
+
+    result = resolve_pool_metadata("d2f12c2f3094ed07", MOCK_PROJECT_ID, timeout=5)
+    assert not result.success
+    assert "no ticker or name" in result.error
+
+
+@patch("yaci_s3.internal.anchor_resolver.resolve_pool_metadata")
+def test_resolve_pool_batch(mock_resolve):
+    mock_resolve.side_effect = [
+        PoolMetadataResult(pool_id="pool1", ticker="AAA", name="Pool A", success=True, http_status=200),
+        PoolMetadataResult(pool_id="pool2", ticker="BBB", name="Pool B", success=True, http_status=200),
+    ]
+
+    results = resolve_pool_batch(["pool1", "pool2"], project_id=MOCK_PROJECT_ID, max_workers=2)
+    assert len(results) == 2
+    assert results["pool1"].ticker == "AAA"
+    assert results["pool2"].name == "Pool B"
