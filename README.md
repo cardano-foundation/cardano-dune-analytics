@@ -222,6 +222,45 @@ uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-0
 uv run yaci-s3 --internal drep_profile --rebuild --dry-run
 ```
 
+### Pool Profile (Internal Job)
+
+The pool profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/pool_profile/pool_profile.parquet` containing one row per `pool_id` with resolved off-chain metadata (ticker, name, description, homepage) via the Blockfrost API.
+
+**Profile schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `pool_id` | string | Pool hash (primary key) |
+| `ticker` | string | Pool ticker (e.g. `TAPSY`) |
+| `name` | string | Pool display name |
+| `description` | string | Pool description |
+| `homepage` | string | Pool homepage URL |
+| `metadata_url` | string | URL of the off-chain metadata JSON |
+| `metadata_hash` | string | Hash of the metadata content |
+| `latest_status` | string | Latest on-chain status (`REGISTRATION`, `UPDATE`, `RETIRED`) |
+| `latest_epoch` | int64 | Epoch of the latest on-chain event |
+| `latest_slot` | int64 | Slot of the latest on-chain event |
+| `latest_tx_hash` | string | Tx hash of the latest on-chain event |
+| `latest_date` | string | Date partition of the latest on-chain event |
+| `fetch_status` | string | `success` or `failed` |
+| `http_status` | int32 | HTTP status code from the Blockfrost call |
+| `last_checked_at` | string | ISO timestamp of last resolution attempt |
+| `updated_at` | string | ISO timestamp of last profile update |
+
+**Update logic:**
+- Reads all unique `pool_id`s from the `pool` parquet (includes active and retired pools)
+- For each pool, queries Blockfrost's `/pools/{pool_id}/metadata` endpoint for ticker, name, description, homepage
+- Never overwrites a good profile with a failed resolution — keeps the existing metadata if new resolution fails
+- Uses token-bucket rate limiting (10 req/s, 500 burst) to stay within Blockfrost API limits
+
+```bash
+# Rebuild from scratch (all pools)
+uv run yaci-s3 --internal pool_profile --rebuild
+
+# Dry run (show what would change, don't write)
+uv run yaci-s3 --internal pool_profile --rebuild --dry-run
+```
+
 ### Hybrid Exporters
 
 Hybrid exporters join local parquet data sources to produce enriched output and upload to S3. They scan source exporter partitions, skip already-uploaded ones, enrich via joins, and upload the result.
@@ -327,7 +366,9 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | Build DRep profile from scratch | `uv run yaci-s3 --internal drep_profile --rebuild` |
 | Update DRep profile for one day | `uv run yaci-s3 --internal drep_profile --date 2024-01-15` |
 | Update DRep profile for date range | `uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-01-31` |
-| Dry run profile rebuild | `uv run yaci-s3 --internal drep_profile --rebuild --dry-run` |
+| Dry run DRep profile rebuild | `uv run yaci-s3 --internal drep_profile --rebuild --dry-run` |
+| Build pool profile from scratch | `uv run yaci-s3 --internal pool_profile --rebuild` |
+| Dry run pool profile rebuild | `uv run yaci-s3 --internal pool_profile --rebuild --dry-run` |
 | Enrich all new drep_dist epochs | `uv run yaci-s3 --hybrid drep_dist_enriched` |
 | Enrich a specific epoch | `uv run yaci-s3 --hybrid drep_dist_enriched --partition 611` |
 | Run all hybrid exporters | `uv run yaci-s3 --hybrid-all` |
@@ -561,8 +602,9 @@ src/yaci_s3/
         contract_registry.py # GitHub client + parsers + incremental exporter
     internal/
         __init__.py          # Internal job registry
-        anchor_resolver.py   # Blockfrost-based DRep metadata resolver
-        drep_profile.py      # DRep profile builder (DuckDB + anchor resolution)
+        anchor_resolver.py   # Blockfrost API client (DRep + pool metadata, rate limiter)
+        drep_profile.py      # DRep profile builder (DuckDB + Blockfrost resolution)
+        pool_profile.py      # Pool profile builder (DuckDB + Blockfrost resolution)
     hybrid/
         __init__.py          # Hybrid exporter registry
         base.py              # HybridExporter ABC (scan + enrich + upload)
