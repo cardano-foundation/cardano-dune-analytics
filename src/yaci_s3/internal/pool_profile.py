@@ -19,6 +19,7 @@ from .anchor_resolver import resolve_pool_batch
 logger = logging.getLogger("yaci_s3.internal.pool_profile")
 
 PROFILE_SCHEMA = pa.schema([
+    ("pool_hash", pa.string()),
     ("pool_id", pa.string()),
     ("ticker", pa.string()),
     ("name", pa.string()),
@@ -47,7 +48,7 @@ def _profile_path(config: AppConfig) -> Path:
 
 
 def _load_existing_profile(config: AppConfig) -> dict:
-    """Load existing profile parquet into a dict keyed by pool_id."""
+    """Load existing profile parquet into a dict keyed by pool_hash."""
     path = _profile_path(config)
     if not path.exists():
         return {}
@@ -56,7 +57,7 @@ def _load_existing_profile(config: AppConfig) -> dict:
     profiles = {}
     for i in range(len(table)):
         row = {col: table.column(col)[i].as_py() for col in table.column_names}
-        profiles[row["pool_id"]] = row
+        profiles[row["pool_hash"]] = row
     return profiles
 
 
@@ -110,19 +111,19 @@ def _build_profiles(
 ) -> dict:
     """Build/update profiles from pool data.
 
-    Returns updated profiles dict.
+    Returns updated profiles dict keyed by pool_hash.
     """
     if len(pools) == 0:
         return existing
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Collect pool info
+    # Collect pool info (pool_id in parquet is the hex hash)
     pool_info = {}
     for i in range(len(pools)):
-        pool_id = pools.column("pool_id")[i].as_py()
-        pool_info[pool_id] = {
-            "pool_id": pool_id,
+        pool_hash = pools.column("pool_id")[i].as_py()
+        pool_info[pool_hash] = {
+            "pool_hash": pool_hash,
             "status": pools.column("status")[i].as_py(),
             "epoch": pools.column("epoch")[i].as_py(),
             "slot": pools.column("slot")[i].as_py(),
@@ -132,12 +133,12 @@ def _build_profiles(
 
     # Determine which pools need resolution
     pools_to_resolve = []
-    for pool_id, info in pool_info.items():
-        ex = existing.get(pool_id)
+    for pool_hash, info in pool_info.items():
+        ex = existing.get(pool_hash)
         # Skip if existing profile has same or newer slot
         if ex and ex.get("latest_slot") is not None and info["slot"] <= ex["latest_slot"]:
             continue
-        pools_to_resolve.append(pool_id)
+        pools_to_resolve.append(pool_hash)
 
     logger.info(
         "Profile update: %d pools to resolve, %d unchanged",
@@ -161,12 +162,13 @@ def _build_profiles(
 
         success_count = 0
         fail_count = 0
-        for pool_id, meta_result in results.items():
-            info = pool_info[pool_id]
+        for pool_hash, meta_result in results.items():
+            info = pool_info[pool_hash]
 
             if meta_result.success:
-                profiles[pool_id] = {
-                    "pool_id": pool_id,
+                profiles[pool_hash] = {
+                    "pool_hash": pool_hash,
+                    "pool_id": meta_result.pool_id,
                     "ticker": meta_result.ticker,
                     "name": meta_result.name,
                     "description": meta_result.description,
@@ -186,19 +188,20 @@ def _build_profiles(
                 success_count += 1
             else:
                 # Never overwrite good with bad
-                ex = existing.get(pool_id)
+                ex = existing.get(pool_hash)
                 if ex and ex.get("fetch_status") == "success":
-                    profiles[pool_id] = dict(ex)
-                    profiles[pool_id]["last_checked_at"] = now_iso
+                    profiles[pool_hash] = dict(ex)
+                    profiles[pool_hash]["last_checked_at"] = now_iso
                     # Update on-chain fields
-                    profiles[pool_id]["latest_status"] = info["status"]
-                    profiles[pool_id]["latest_epoch"] = info["epoch"]
-                    profiles[pool_id]["latest_slot"] = info["slot"]
-                    profiles[pool_id]["latest_tx_hash"] = info["tx_hash"]
-                    profiles[pool_id]["latest_date"] = info["source_date"]
+                    profiles[pool_hash]["latest_status"] = info["status"]
+                    profiles[pool_hash]["latest_epoch"] = info["epoch"]
+                    profiles[pool_hash]["latest_slot"] = info["slot"]
+                    profiles[pool_hash]["latest_tx_hash"] = info["tx_hash"]
+                    profiles[pool_hash]["latest_date"] = info["source_date"]
                 else:
-                    profiles[pool_id] = {
-                        "pool_id": pool_id,
+                    profiles[pool_hash] = {
+                        "pool_hash": pool_hash,
+                        "pool_id": meta_result.pool_id,
                         "ticker": None,
                         "name": None,
                         "description": None,
@@ -220,10 +223,11 @@ def _build_profiles(
         logger.info("Resolution: %d success, %d failed", success_count, fail_count)
 
     # Add pools that weren't in the resolve list (unchanged) but also not in existing
-    for pool_id, info in pool_info.items():
-        if pool_id not in profiles:
-            profiles[pool_id] = {
-                "pool_id": pool_id,
+    for pool_hash, info in pool_info.items():
+        if pool_hash not in profiles:
+            profiles[pool_hash] = {
+                "pool_hash": pool_hash,
+                "pool_id": None,
                 "ticker": None,
                 "name": None,
                 "description": None,
@@ -256,8 +260,8 @@ def _write_profile(profiles: dict, config: AppConfig):
 
     # Build columns
     columns = {field.name: [] for field in PROFILE_SCHEMA}
-    for pool_id in sorted(profiles.keys()):
-        row = profiles[pool_id]
+    for pool_hash in sorted(profiles.keys()):
+        row = profiles[pool_hash]
         for col in columns:
             columns[col].append(row.get(col))
 

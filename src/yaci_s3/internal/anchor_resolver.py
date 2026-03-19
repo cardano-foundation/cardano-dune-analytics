@@ -29,7 +29,8 @@ class AnchorResult:
 @dataclass
 class PoolMetadataResult:
     """Result of resolving a single pool's off-chain metadata."""
-    pool_id: str
+    pool_hash: str
+    pool_id: Optional[str] = None  # bech32 pool_id from Blockfrost
     ticker: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
@@ -167,10 +168,11 @@ def resolve_pool_metadata(
     data, status, error = _blockfrost_get(url, project_id, timeout, rate_limiter)
 
     if error:
-        return PoolMetadataResult(pool_id=pool_id, http_status=status, error=error)
+        return PoolMetadataResult(pool_hash=pool_id, http_status=status, error=error)
 
     result = PoolMetadataResult(
-        pool_id=pool_id,
+        pool_hash=pool_id,
+        pool_id=data.get("pool_id"),  # bech32 pool_id from Blockfrost
         http_status=status,
         ticker=data.get("ticker"),
         name=data.get("name"),
@@ -239,7 +241,7 @@ def resolve_pool_batch(
     return _resolve_batch_generic(
         ids=pool_ids,
         resolve_fn=resolve_pool_metadata,
-        error_factory=lambda pid, err: PoolMetadataResult(pool_id=pid, error=err),
+        error_factory=lambda pid, err: PoolMetadataResult(pool_hash=pid, error=err),
         project_id=project_id,
         max_workers=max_workers,
         timeout=timeout,

@@ -189,6 +189,8 @@ def test_resolve_pool_metadata_success(mock_get):
 
     result = resolve_pool_metadata("d2f12c2f3094ed07", MOCK_PROJECT_ID, timeout=5)
     assert result.success
+    assert result.pool_hash == "d2f12c2f3094ed07"
+    assert result.pool_id == "pool1abc"
     assert result.ticker == "TAPSY"
     assert result.name == "TapTap Vienna"
     assert result.description == "low fees"
@@ -228,11 +230,12 @@ def test_resolve_pool_metadata_no_ticker_no_name(mock_get):
 @patch("yaci_s3.internal.anchor_resolver.resolve_pool_metadata")
 def test_resolve_pool_batch(mock_resolve):
     mock_resolve.side_effect = [
-        PoolMetadataResult(pool_id="pool1", ticker="AAA", name="Pool A", success=True, http_status=200),
-        PoolMetadataResult(pool_id="pool2", ticker="BBB", name="Pool B", success=True, http_status=200),
+        PoolMetadataResult(pool_hash="hash1", pool_id="pool1", ticker="AAA", name="Pool A", success=True, http_status=200),
+        PoolMetadataResult(pool_hash="hash2", pool_id="pool2", ticker="BBB", name="Pool B", success=True, http_status=200),
     ]
 
-    results = resolve_pool_batch(["pool1", "pool2"], project_id=MOCK_PROJECT_ID, max_workers=2)
+    results = resolve_pool_batch(["hash1", "hash2"], project_id=MOCK_PROJECT_ID, max_workers=2)
     assert len(results) == 2
-    assert results["pool1"].ticker == "AAA"
-    assert results["pool2"].name == "Pool B"
+    assert results["hash1"].ticker == "AAA"
+    assert results["hash1"].pool_id == "pool1"
+    assert results["hash2"].name == "Pool B"

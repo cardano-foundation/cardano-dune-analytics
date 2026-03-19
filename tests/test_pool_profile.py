@@ -62,7 +62,8 @@ def test_write_and_load_profile():
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
         profiles = {
-            "pool1abc": {
+            "hash1abc": {
+                "pool_hash": "hash1abc",
                 "pool_id": "pool1abc",
                 "ticker": "TAPSY",
                 "name": "TapTap Vienna",
@@ -88,8 +89,8 @@ def test_write_and_load_profile():
 
         loaded = _load_existing_profile(config)
         assert len(loaded) == 1
-        assert loaded["pool1abc"]["ticker"] == "TAPSY"
-        assert loaded["pool1abc"]["name"] == "TapTap Vienna"
+        assert loaded["hash1abc"]["ticker"] == "TAPSY"
+        assert loaded["hash1abc"]["pool_id"] == "pool1abc"
 
 
 @patch("yaci_s3.internal.pool_profile.resolve_pool_batch")
@@ -97,22 +98,23 @@ def test_pool_profile_rebuild(mock_resolve):
     from yaci_s3.internal.anchor_resolver import PoolMetadataResult
 
     mock_resolve.return_value = {
-        "pool1abc": PoolMetadataResult(
-            pool_id="pool1abc", ticker="TAPSY", name="TapTap Vienna",
-            description="low fees", homepage="https://example.com",
+        "hash1abc": PoolMetadataResult(
+            pool_hash="hash1abc", pool_id="pool1bech32", ticker="TAPSY",
+            name="TapTap Vienna", description="low fees",
+            homepage="https://example.com",
             metadata_url="https://example.com/meta.json", metadata_hash="hash1",
             success=True, http_status=200,
         ),
-        "pool2def": PoolMetadataResult(
-            pool_id="pool2def", http_status=404, error="no metadata",
+        "hash2def": PoolMetadataResult(
+            pool_hash="hash2def", http_status=404, error="no metadata",
         ),
     }
 
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
         _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "pool1abc", "slot": 1000, "epoch": 500},
-            {"pool_id": "pool2def", "slot": 2000, "epoch": 510},
+            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
+            {"pool_id": "hash2def", "slot": 2000, "epoch": 510},
         ])
 
         job = PoolProfileJob(config)
@@ -122,9 +124,10 @@ def test_pool_profile_rebuild(mock_resolve):
         assert summary["profiles_after"] == 2
 
         loaded = _load_existing_profile(config)
-        assert loaded["pool1abc"]["ticker"] == "TAPSY"
-        assert loaded["pool1abc"]["fetch_status"] == "success"
-        assert loaded["pool2def"]["fetch_status"] == "failed"
+        assert loaded["hash1abc"]["ticker"] == "TAPSY"
+        assert loaded["hash1abc"]["pool_id"] == "pool1bech32"
+        assert loaded["hash1abc"]["fetch_status"] == "success"
+        assert loaded["hash2def"]["fetch_status"] == "failed"
 
 
 @patch("yaci_s3.internal.pool_profile.resolve_pool_batch")
@@ -136,8 +139,9 @@ def test_pool_profile_never_overwrite_good_with_bad(mock_resolve):
 
         # Write existing profile with success
         existing = {
-            "pool1abc": {
-                "pool_id": "pool1abc", "ticker": "TAPSY", "name": "TapTap",
+            "hash1abc": {
+                "pool_hash": "hash1abc", "pool_id": "pool1bech32",
+                "ticker": "TAPSY", "name": "TapTap",
                 "description": "old", "homepage": "https://old.com",
                 "metadata_url": "https://old.com/meta.json", "metadata_hash": "h1",
                 "latest_status": "REGISTRATION", "latest_epoch": 500,
@@ -151,12 +155,12 @@ def test_pool_profile_never_overwrite_good_with_bad(mock_resolve):
 
         # New pool event with higher slot, but resolution will fail
         _write_pool_parquet(base, "2024-01-20", [
-            {"pool_id": "pool1abc", "slot": 2000, "epoch": 510},
+            {"pool_id": "hash1abc", "slot": 2000, "epoch": 510},
         ])
 
         mock_resolve.return_value = {
-            "pool1abc": PoolMetadataResult(
-                pool_id="pool1abc", http_status=404, error="no metadata",
+            "hash1abc": PoolMetadataResult(
+                pool_hash="hash1abc", http_status=404, error="no metadata",
             ),
         }
 
@@ -165,10 +169,10 @@ def test_pool_profile_never_overwrite_good_with_bad(mock_resolve):
 
         loaded = _load_existing_profile(config)
         # Should keep old good metadata
-        assert loaded["pool1abc"]["ticker"] == "TAPSY"
-        assert loaded["pool1abc"]["fetch_status"] == "success"
+        assert loaded["hash1abc"]["ticker"] == "TAPSY"
+        assert loaded["hash1abc"]["fetch_status"] == "success"
         # But on-chain fields should update
-        assert loaded["pool1abc"]["latest_slot"] == 2000
+        assert loaded["hash1abc"]["latest_slot"] == 2000
 
 
 @patch("yaci_s3.internal.pool_profile.resolve_pool_batch")
