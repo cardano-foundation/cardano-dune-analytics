@@ -116,6 +116,7 @@ class AssetDataExporter(ExternalExporter):
     """Exports verified token data from the Minswap API."""
 
     name = "asset_data"
+    multi_snapshot = True
 
     def __init__(self, config: AppConfig, db: TrackingDB, uploader: S3Uploader):
         super().__init__(config, db, uploader)

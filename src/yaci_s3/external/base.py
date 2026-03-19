@@ -23,6 +23,8 @@ class ExternalExporter(ABC):
 
     # Subclasses must set this
     name: str = ""
+    # Set True for exporters that produce multiple snapshots per day (e.g. asset_data)
+    multi_snapshot: bool = False
 
     def __init__(self, config: AppConfig, db: TrackingDB, uploader: S3Uploader):
         self.config = config
@@ -69,8 +71,12 @@ class ExternalExporter(ABC):
 
             # Write parquet
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            suffix = self.db.get_next_suffix(self.name, date_str)
-            partition_value = f"{date_str}.{suffix}"
+            if self.multi_snapshot:
+                suffix = self.db.get_next_suffix(self.name, date_str)
+                partition_value = f"{date_str}.{suffix}"
+            else:
+                suffix = None
+                partition_value = date_str
 
             local_path = self._write_parquet(table, date_str, suffix)
             file_size = os.path.getsize(local_path)
@@ -127,20 +133,25 @@ class ExternalExporter(ABC):
 
         return summary
 
-    def _write_parquet(self, table: pa.Table, date_str: str, suffix: int) -> str:
+    def _write_parquet(self, table: pa.Table, date_str: str, suffix: Optional[int] = None) -> str:
         """Write a PyArrow Table to a local parquet file."""
         dir_path = os.path.join(
             self.config.base_data_path, self.name, f"date={date_str}",
         )
         os.makedirs(dir_path, exist_ok=True)
-        file_name = f"{self.name}-{date_str}.{suffix}.parquet"
+        if suffix is not None:
+            file_name = f"{self.name}-{date_str}.{suffix}.parquet"
+        else:
+            file_name = f"{self.name}-{date_str}.parquet"
         file_path = os.path.join(dir_path, file_name)
         pq.write_table(table, file_path)
         return file_path
 
-    def _build_s3_key(self, date_str: str, suffix: int) -> str:
+    def _build_s3_key(self, date_str: str, suffix: Optional[int] = None) -> str:
         """Build the S3 key for an external exporter file."""
-        return f"{self.name}/{date_str}/{self.name}-{date_str}.{suffix}.parquet"
+        if suffix is not None:
+            return f"{self.name}/{date_str}/{self.name}-{date_str}.{suffix}.parquet"
+        return f"{self.name}/{date_str}/{self.name}-{date_str}.parquet"
 
     def _upload_to_s3(self, partition: PartitionInfo, s3_key: str,
                       dry_run: bool = False) -> Optional[str]:

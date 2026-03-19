@@ -301,13 +301,15 @@ Hybrid exporters **do not** require PostgreSQL credentials.
 
 #### File Naming
 
-External exporters use a `.N` suffix to allow multiple snapshots per day:
+Most external exporters produce one file per day:
 
-- **S3 key**: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
-- **Local**: `{BASE_DATA_PATH}/{exporter}/date={YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
+- **S3 key**: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
+- **Local**: `{BASE_DATA_PATH}/{exporter}/date={YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
+
+`asset_data` runs every 2 hours and uses a `.N` suffix for multiple snapshots per day:
+
+- **S3 key**: `asset_data/{YYYY-MM-DD}/asset_data-{YYYY-MM-DD}.{N}.parquet`
 - **Tracking DB partition_value**: `{YYYY-MM-DD}.{N}` (e.g., `2024-01-15.1`, `2024-01-15.2`)
-
-The suffix N is the count of existing uploads for that date + 1, queried from the tracking DB.
 
 #### Scheduling
 
@@ -405,7 +407,7 @@ Mismatches are logged to the `validation_errors` table and the partition is skip
 
 - Daily: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
 - Epoch: `{exporter}/{N}/{exporter}-epoch-{N}.parquet`
-- External: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.{N}.parquet`
+- External: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet` (or `.{N}.parquet` for `asset_data`)
 - Hybrid: `{exporter}/{N}/{exporter}-epoch-{N}.parquet`
 
 ### SQLite Tracking Database
