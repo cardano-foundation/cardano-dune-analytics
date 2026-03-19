@@ -353,6 +353,7 @@ def run_external(
     config: AppConfig,
     exporter_names: List[str],
     dry_run: bool = False,
+    rebuild: bool = False,
 ):
     """Run external API-based exporters."""
     from .external import EXTERNAL_EXPORTERS
@@ -370,7 +371,11 @@ def run_external(
 
         exporter_cls = EXTERNAL_EXPORTERS[name]
         exporter = exporter_cls(config, db, uploader)
-        summary = exporter.run(dry_run=dry_run)
+        # Pass rebuild to exporters that support it
+        if rebuild and hasattr(exporter, 'run') and 'rebuild' in exporter.run.__code__.co_varnames:
+            summary = exporter.run(dry_run=dry_run, rebuild=rebuild)
+        else:
+            summary = exporter.run(dry_run=dry_run)
         summaries.append(summary)
 
     db.close()

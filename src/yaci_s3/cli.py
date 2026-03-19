@@ -64,7 +64,7 @@ def _expand_range(range_str: str) -> list:
 @click.option("--dry-run", is_flag=True, help="Validate only, skip uploads")
 @click.option("--skip-validation", is_flag=True, help="Skip PG validation")
 @click.option("--rebuild-tracking", is_flag=True, help="Rebuild SQLite tracking from S3")
-@click.option("--external", "external_name", type=click.Choice(["asset_data", "contract_registry"]),
+@click.option("--external", "external_name", type=click.Choice(["asset_data", "contract_registry", "off_chain_pool_data"]),
               help="Run a single external exporter")
 @click.option("--external-all", is_flag=True, help="Run all external exporters")
 @click.option("--hybrid", "hybrid_name", type=str, default=None,
@@ -72,7 +72,7 @@ def _expand_range(range_str: str) -> list:
 @click.option("--hybrid-all", is_flag=True, help="Run all hybrid exporters")
 @click.option("--internal", "internal_name", type=str, default=None,
               help="Run an internal job (e.g. drep_profile)")
-@click.option("--rebuild", is_flag=True, help="Rebuild from scratch (for internal jobs)")
+@click.option("--rebuild", is_flag=True, help="Rebuild from scratch (for internal jobs and off_chain_pool_data)")
 @click.option("--date", "single_date", type=str, default=None,
               help="Process a specific date (for internal jobs, YYYY-MM-DD)")
 @click.option("--start-date", type=str, default=None,
@@ -171,10 +171,11 @@ def main(
     if external_name or external_all:
         from .orchestrator import run_external
         if external_all:
-            names = ["asset_data", "contract_registry"]
+            from .external import EXTERNAL_EXPORTERS
+            names = list(EXTERNAL_EXPORTERS.keys())
         else:
             names = [external_name]
-        run_external(config=config, exporter_names=names, dry_run=dry_run)
+        run_external(config=config, exporter_names=names, dry_run=dry_run, rebuild=rebuild)
         return
 
     if rebuild_tracking:

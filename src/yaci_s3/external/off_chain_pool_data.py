@@ -8,6 +8,7 @@ from typing import Optional
 
 import duckdb
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from . import register
 from .base import ExternalExporter
@@ -17,6 +18,18 @@ from ..internal.anchor_resolver import resolve_pool_batch
 from ..uploader import S3Uploader
 
 logger = logging.getLogger("yaci_s3.external.off_chain_pool_data")
+
+SCHEMA = pa.schema([
+    ("pool_hash", pa.string()),
+    ("pool_id", pa.string()),
+    ("ticker", pa.string()),
+    ("name", pa.string()),
+    ("description", pa.string()),
+    ("homepage", pa.string()),
+    ("metadata_url", pa.string()),
+    ("metadata_hash", pa.string()),
+    ("fetched_at", pa.string()),
+])
 
 
 def _read_pool_hashes(base_data_path: str) -> list:
@@ -51,24 +64,69 @@ def _read_pool_hashes(base_data_path: str) -> list:
     return pool_hashes
 
 
+def _read_already_exported(base_data_path: str) -> set:
+    """Read pool_hash values from existing off_chain_pool_data parquet exports."""
+    export_dir = Path(base_data_path) / "off_chain_pool_data"
+    if not export_dir.is_dir():
+        return set()
+
+    files_list = sorted(pyglob(f"{base_data_path}/off_chain_pool_data/date=*/*.parquet"))
+    if not files_list:
+        return set()
+
+    already = set()
+    for f in files_list:
+        try:
+            table = pq.read_table(f, columns=["pool_hash"])
+            already.update(table.column("pool_hash").to_pylist())
+        except Exception as e:
+            logger.warning("Failed to read %s: %s", f, e)
+
+    logger.info("Found %d already-exported pool hashes", len(already))
+    return already
+
+
 @register("off_chain_pool_data")
 class OffChainPoolDataExporter(ExternalExporter):
-    """Exports pool off-chain metadata from Blockfrost."""
+    """Exports pool off-chain metadata from Blockfrost.
+
+    Supports two modes:
+    - rebuild: resolve ALL unique pools from on-chain data
+    - incremental (default): only resolve pools not already in previous exports
+    """
 
     name = "off_chain_pool_data"
 
     def __init__(self, config: AppConfig, db: TrackingDB, uploader: S3Uploader):
         super().__init__(config, db, uploader)
+        self._rebuild = False
 
     def fetch_data(self) -> Optional[pa.Table]:
-        """Read on-chain pool hashes and resolve metadata via Blockfrost."""
-        pool_hashes = _read_pool_hashes(self.config.base_data_path)
-        if not pool_hashes:
+        """Read on-chain pool hashes and resolve metadata via Blockfrost.
+
+        In incremental mode, skips pools already present in previous exports.
+        """
+        all_pool_hashes = _read_pool_hashes(self.config.base_data_path)
+        if not all_pool_hashes:
             return None
 
-        logger.info("Resolving metadata for %d pools", len(pool_hashes))
+        if self._rebuild:
+            pools_to_resolve = all_pool_hashes
+            logger.info("[REBUILD] Resolving all %d pools", len(pools_to_resolve))
+        else:
+            already_exported = _read_already_exported(self.config.base_data_path)
+            pools_to_resolve = [h for h in all_pool_hashes if h not in already_exported]
+            logger.info(
+                "Incremental: %d total pools, %d already exported, %d to resolve",
+                len(all_pool_hashes), len(already_exported), len(pools_to_resolve),
+            )
+
+        if not pools_to_resolve:
+            logger.info("No new pools to resolve")
+            return None
+
         results = resolve_pool_batch(
-            pool_hashes,
+            pools_to_resolve,
             project_id=self.config.blockfrost_project_id,
             max_workers=self.config.anchor_max_workers,
         )
@@ -100,21 +158,14 @@ class OffChainPoolDataExporter(ExternalExporter):
         if not rows:
             return None
 
-        schema = pa.schema([
-            ("pool_hash", pa.string()),
-            ("pool_id", pa.string()),
-            ("ticker", pa.string()),
-            ("name", pa.string()),
-            ("description", pa.string()),
-            ("homepage", pa.string()),
-            ("metadata_url", pa.string()),
-            ("metadata_hash", pa.string()),
-            ("fetched_at", pa.string()),
-        ])
-
         arrays = {col.name: pa.array([r[col.name] for r in rows], type=col.type)
-                  for col in schema}
-        return pa.table(arrays, schema=schema)
+                  for col in SCHEMA}
+        return pa.table(arrays, schema=SCHEMA)
+
+    def run(self, dry_run: bool = False, rebuild: bool = False) -> dict:
+        """Run the exporter. Set rebuild=True to re-resolve all pools."""
+        self._rebuild = rebuild
+        return super().run(dry_run=dry_run)
 
     def validate(self, table: pa.Table) -> bool:
         """Validate pool data: non-empty, unique pool_hash."""
