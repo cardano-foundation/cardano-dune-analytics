@@ -65,6 +65,26 @@ class GitHubClient:
             return None
         return resp.get("sha")
 
+    def get_changed_files(
+        self, owner: str, repo: str, base_sha: str, head_sha: str, path: str,
+    ) -> Optional[List[str]]:
+        """Get list of changed file paths between two commits, filtered to a path prefix.
+
+        Returns None on API failure (caller should fall back to full fetch).
+        Returns list of file paths (relative to repo root) for added/modified JSON files.
+        """
+        url = f"https://api.github.com/repos/{owner}/{repo}/compare/{base_sha}...{head_sha}"
+        resp = self._get(url)
+        if resp is None:
+            return None
+
+        prefix = path.rstrip("/") + "/"
+        changed = []
+        for f in resp.get("files", []):
+            if f["status"] in ("added", "modified") and f["filename"].startswith(prefix) and f["filename"].endswith(".json"):
+                changed.append(f["filename"])
+        return changed
+
     def get_tree(self, owner: str, repo: str, branch: str, path: str) -> List[dict]:
         """Get the file tree for a path in a repo using the Git Trees API (recursive)."""
         # First get the tree SHA for the branch
@@ -235,10 +255,12 @@ class ContractRegistryExporter(ExternalExporter):
         self.client = GitHubClient(token=config.github_token)
 
     def fetch_data(self) -> Optional[pa.Table]:
-        """Fetch new contract registry entries from GitHub.
+        """Fetch contract registry entries from GitHub sources with new commits.
 
-        Checks each source for new commits, parses script hashes,
-        and returns only truly new hashes.
+        When a source has a new commit, ALL records from that source are exported
+        (not just new hashes). This ensures metadata updates (project_name, category,
+        etc.) for existing script hashes are picked up with a fresh fetched_at.
+        Dune consumers use fetched_at to identify the latest version.
         """
         # Step 1: Check for new commits
         sources_to_update = []
@@ -267,24 +289,24 @@ class ContractRegistryExporter(ExternalExporter):
             logger.info("No sources have new commits, nothing to export")
             return None
 
-        # Step 2: Fetch and parse all records from updated sources
+        # Step 2: Fetch and parse records from updated sources (changed files only when possible)
         all_records = []
         for source, latest_sha in sources_to_update:
-            records = self._fetch_source_records(source)
+            stored_sha = self.db.get_contract_registry_state(source["name"])
+            if stored_sha:
+                records = self._fetch_changed_source_records(source, stored_sha, latest_sha)
+            else:
+                records = self._fetch_source_records(source)
             all_records.extend(records)
             logger.info("[%s] Parsed %d records", source["name"], len(records))
 
         if not all_records:
-            # Update SHAs even if no records found (source might just have metadata changes)
+            # Update SHAs even if no records found
             for source, latest_sha in sources_to_update:
                 self.db.update_contract_registry_state(source["name"], latest_sha)
             return None
 
-        # Step 3: Filter to truly new hashes, respecting priority
-        known_hashes = self.db.get_known_script_hashes()
-        hash_sources = self.db.get_script_hash_sources()
-
-        new_records = []
+        # Step 3: Deduplicate by priority (highest priority source wins per script_hash)
         seen_in_batch = {}  # script_hash -> record (keep highest priority)
 
         for record in all_records:
@@ -292,13 +314,6 @@ class ContractRegistryExporter(ExternalExporter):
             source_name = record["source"]
             priority = SOURCE_PRIORITY[source_name]
 
-            # Skip if already known from same or higher priority source
-            if sh in known_hashes:
-                existing_source = hash_sources.get(sh)
-                if existing_source and SOURCE_PRIORITY.get(existing_source, 99) <= priority:
-                    continue
-
-            # Within this batch, keep highest priority
             if sh in seen_in_batch:
                 existing_priority = SOURCE_PRIORITY[seen_in_batch[sh]["source"]]
                 if existing_priority <= priority:
@@ -306,26 +321,23 @@ class ContractRegistryExporter(ExternalExporter):
 
             seen_in_batch[sh] = record
 
-        new_records = list(seen_in_batch.values())
+        export_records = list(seen_in_batch.values())
 
-        if not new_records:
-            logger.info("No new script hashes found")
-            # Still update SHAs
+        if not export_records:
             for source, latest_sha in sources_to_update:
                 self.db.update_contract_registry_state(source["name"], latest_sha)
             return None
 
-        logger.info("Found %d new script hashes", len(new_records))
+        logger.info("Exporting %d script hashes (new + updated)", len(export_records))
 
         # Step 4: Build the Arrow table
         now = datetime.now(timezone.utc).isoformat()
-        table = self._records_to_table(new_records, now)
+        table = self._records_to_table(export_records, now)
 
-        # Step 5: Update tracking state (SHAs and hashes) atomically
-        # Only update after successful table creation
+        # Step 5: Update tracking state
         try:
             now_ts = datetime.now(timezone.utc).isoformat()
-            for r in new_records:
+            for r in export_records:
                 self.db.conn.execute(
                     "INSERT OR IGNORE INTO contract_registry_hashes (script_hash, source, first_seen_at) VALUES (?, ?, ?)",
                     (r["script_hash"], r["source"], now_ts),
@@ -341,6 +353,36 @@ class ContractRegistryExporter(ExternalExporter):
             raise
 
         return table
+
+    def _fetch_changed_source_records(
+        self, source: dict, stored_sha: str, latest_sha: str,
+    ) -> List[dict]:
+        """Fetch records only from files that changed between stored_sha and latest_sha."""
+        changed_files = self.client.get_changed_files(
+            source["owner"], source["repo"], stored_sha, latest_sha, source["path"],
+        )
+        if changed_files is None:
+            logger.warning("[%s] Compare API failed, falling back to full fetch", source["name"])
+            return self._fetch_source_records(source)
+
+        if not changed_files:
+            logger.info("[%s] No JSON files changed", source["name"])
+            return []
+
+        logger.info("[%s] %d changed JSON files", source["name"], len(changed_files))
+
+        parser = PARSERS[source["name"]]
+        records = []
+        for file_path in changed_files:
+            content = self.client.get_file_content(
+                source["owner"], source["repo"], source["branch"], file_path,
+            )
+            if content is None:
+                continue
+            file_records = parser(content, file_path)
+            records.extend(file_records)
+
+        return records
 
     def _fetch_source_records(self, source: dict) -> List[dict]:
         """Fetch all records from a single source."""
