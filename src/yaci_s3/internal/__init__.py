@@ -15,4 +15,3 @@ def register(name: str):
 
 # Import submodules to trigger registration
 from . import drep_profile  # noqa: F401, E402
-from . import pool_profile  # noqa: F401, E402

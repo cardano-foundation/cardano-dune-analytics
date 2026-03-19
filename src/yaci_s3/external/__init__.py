@@ -16,3 +16,4 @@ def register(name: str):
 # Import submodules to trigger registration
 from . import asset_data  # noqa: F401, E402
 from . import contract_registry  # noqa: F401, E402
+from . import off_chain_pool_data  # noqa: F401, E402
