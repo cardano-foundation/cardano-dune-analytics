@@ -196,7 +196,6 @@ def test_resolve_pool_metadata_success(mock_get):
     assert result.description == "low fees"
     assert result.homepage == "https://tap-ada.github.io"
     assert result.metadata_url == "https://example.com/poolmeta.json"
-    assert result.http_status == 200
 
 
 @patch(PATCH_GET)
@@ -205,7 +204,6 @@ def test_resolve_pool_metadata_404(mock_get):
 
     result = resolve_pool_metadata("deadbeef", MOCK_PROJECT_ID, timeout=5)
     assert not result.success
-    assert result.http_status == 404
     assert result.error == "no metadata"
 
 
@@ -230,8 +228,8 @@ def test_resolve_pool_metadata_no_ticker_no_name(mock_get):
 @patch("yaci_s3.internal.anchor_resolver.resolve_pool_metadata")
 def test_resolve_pool_batch(mock_resolve):
     mock_resolve.side_effect = [
-        PoolMetadataResult(pool_hash="hash1", pool_id="pool1", ticker="AAA", name="Pool A", success=True, http_status=200),
-        PoolMetadataResult(pool_hash="hash2", pool_id="pool2", ticker="BBB", name="Pool B", success=True, http_status=200),
+        PoolMetadataResult(pool_hash="hash1", pool_id="pool1", ticker="AAA", name="Pool A", success=True),
+        PoolMetadataResult(pool_hash="hash2", pool_id="pool2", ticker="BBB", name="Pool B", success=True),
     ]
 
     results = resolve_pool_batch(["hash1", "hash2"], project_id=MOCK_PROJECT_ID, max_workers=2)

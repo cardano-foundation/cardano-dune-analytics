@@ -27,15 +27,7 @@ PROFILE_SCHEMA = pa.schema([
     ("homepage", pa.string()),
     ("metadata_url", pa.string()),
     ("metadata_hash", pa.string()),
-    ("latest_status", pa.string()),
-    ("latest_epoch", pa.int64()),
-    ("latest_slot", pa.int64()),
-    ("latest_tx_hash", pa.string()),
-    ("latest_date", pa.string()),
-    ("fetch_status", pa.string()),
-    ("http_status", pa.int32()),
-    ("last_checked_at", pa.string()),
-    ("updated_at", pa.string()),
+    ("fetched_at", pa.string()),
 ])
 
 
@@ -61,96 +53,70 @@ def _load_existing_profile(config: AppConfig) -> dict:
     return profiles
 
 
-def _read_pools(config: AppConfig) -> pa.Table:
-    """Read pool parquet files and return latest event per pool_id."""
+def _read_pools(config: AppConfig) -> list:
+    """Read pool parquet files and return list of distinct pool hashes."""
     base = config.base_data_path
     pool_dir = Path(base) / "pool"
 
     if not pool_dir.is_dir():
         logger.warning("pool directory not found: %s", pool_dir)
-        return pa.table({})
+        return []
 
     files_list = sorted(pyglob(f"{base}/pool/date=*/*.parquet"))
     if not files_list:
         logger.warning("No pool parquet files found")
-        return pa.table({})
+        return []
 
     logger.info("Reading %d pool file(s)", len(files_list))
 
     conn = duckdb.connect(":memory:")
     try:
         result = conn.execute(
-            """
-            WITH ranked AS (
-                SELECT pool_id, status, epoch, slot, tx_hash,
-                       regexp_extract(filename, 'date=([^/]+)', 1) as source_date,
-                       ROW_NUMBER() OVER (PARTITION BY pool_id ORDER BY slot DESC) as rn
-                FROM read_parquet(?, filename=true)
-            )
-            SELECT pool_id, status, epoch, slot, tx_hash, source_date
-            FROM ranked WHERE rn = 1
-            ORDER BY pool_id
-            """,
+            "SELECT DISTINCT pool_id FROM read_parquet(?) ORDER BY pool_id",
             [files_list],
-        ).fetch_arrow_table()
+        ).fetchall()
     except Exception as e:
         logger.error("DuckDB read failed: %s", e)
-        return pa.table({})
+        return []
     finally:
         conn.close()
 
-    logger.info("Read %d unique pools", len(result))
-    return result
+    pool_hashes = [row[0] for row in result]
+    logger.info("Read %d unique pools", len(pool_hashes))
+    return pool_hashes
 
 
 def _build_profiles(
-    pools: pa.Table,
+    pool_hashes: list,
     existing: dict,
     config: AppConfig,
     dry_run: bool = False,
 ) -> dict:
     """Build/update profiles from pool data.
 
+    Only successfully resolved pools are stored. Failed resolutions are skipped
+    (existing successful entries are preserved).
+
     Returns updated profiles dict keyed by pool_hash.
     """
-    if len(pools) == 0:
+    if not pool_hashes:
         return existing
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Collect pool info (pool_id in parquet is the hex hash)
-    pool_info = {}
-    for i in range(len(pools)):
-        pool_hash = pools.column("pool_id")[i].as_py()
-        pool_info[pool_hash] = {
-            "pool_hash": pool_hash,
-            "status": pools.column("status")[i].as_py(),
-            "epoch": pools.column("epoch")[i].as_py(),
-            "slot": pools.column("slot")[i].as_py(),
-            "tx_hash": pools.column("tx_hash")[i].as_py(),
-            "source_date": pools.column("source_date")[i].as_py(),
-        }
-
-    # Determine which pools need resolution
-    pools_to_resolve = []
-    for pool_hash, info in pool_info.items():
-        ex = existing.get(pool_hash)
-        # Skip if existing profile has same or newer slot
-        if ex and ex.get("latest_slot") is not None and info["slot"] <= ex["latest_slot"]:
-            continue
-        pools_to_resolve.append(pool_hash)
+    # Determine which pools need resolution (not already successfully resolved)
+    pools_to_resolve = [h for h in pool_hashes if h not in existing]
 
     logger.info(
-        "Profile update: %d pools to resolve, %d unchanged",
+        "Profile update: %d pools to resolve, %d already resolved",
         len(pools_to_resolve),
-        len(pool_info) - len(pools_to_resolve),
+        len(pool_hashes) - len(pools_to_resolve),
     )
 
     if dry_run:
         logger.info("[DRY RUN] Would resolve %d pools", len(pools_to_resolve))
         return existing
 
-    # Resolve metadata via Blockfrost in parallel
     profiles = dict(existing)
 
     if pools_to_resolve:
@@ -163,8 +129,6 @@ def _build_profiles(
         success_count = 0
         fail_count = 0
         for pool_hash, meta_result in results.items():
-            info = pool_info[pool_hash]
-
             if meta_result.success:
                 profiles[pool_hash] = {
                     "pool_hash": pool_hash,
@@ -175,75 +139,13 @@ def _build_profiles(
                     "homepage": meta_result.homepage,
                     "metadata_url": meta_result.metadata_url,
                     "metadata_hash": meta_result.metadata_hash,
-                    "latest_status": info["status"],
-                    "latest_epoch": info["epoch"],
-                    "latest_slot": info["slot"],
-                    "latest_tx_hash": info["tx_hash"],
-                    "latest_date": info["source_date"],
-                    "fetch_status": "success",
-                    "http_status": meta_result.http_status,
-                    "last_checked_at": now_iso,
-                    "updated_at": now_iso,
+                    "fetched_at": now_iso,
                 }
                 success_count += 1
             else:
-                # Never overwrite good with bad
-                ex = existing.get(pool_hash)
-                if ex and ex.get("fetch_status") == "success":
-                    profiles[pool_hash] = dict(ex)
-                    profiles[pool_hash]["last_checked_at"] = now_iso
-                    # Update on-chain fields
-                    profiles[pool_hash]["latest_status"] = info["status"]
-                    profiles[pool_hash]["latest_epoch"] = info["epoch"]
-                    profiles[pool_hash]["latest_slot"] = info["slot"]
-                    profiles[pool_hash]["latest_tx_hash"] = info["tx_hash"]
-                    profiles[pool_hash]["latest_date"] = info["source_date"]
-                else:
-                    profiles[pool_hash] = {
-                        "pool_hash": pool_hash,
-                        "pool_id": meta_result.pool_id,
-                        "ticker": None,
-                        "name": None,
-                        "description": None,
-                        "homepage": None,
-                        "metadata_url": None,
-                        "metadata_hash": None,
-                        "latest_status": info["status"],
-                        "latest_epoch": info["epoch"],
-                        "latest_slot": info["slot"],
-                        "latest_tx_hash": info["tx_hash"],
-                        "latest_date": info["source_date"],
-                        "fetch_status": "failed",
-                        "http_status": meta_result.http_status,
-                        "last_checked_at": now_iso,
-                        "updated_at": now_iso,
-                    }
                 fail_count += 1
 
         logger.info("Resolution: %d success, %d failed", success_count, fail_count)
-
-    # Add pools that weren't in the resolve list (unchanged) but also not in existing
-    for pool_hash, info in pool_info.items():
-        if pool_hash not in profiles:
-            profiles[pool_hash] = {
-                "pool_hash": pool_hash,
-                "pool_id": None,
-                "ticker": None,
-                "name": None,
-                "description": None,
-                "homepage": None,
-                "metadata_url": None,
-                "metadata_hash": None,
-                "latest_status": info["status"],
-                "latest_epoch": info["epoch"],
-                "latest_slot": info["slot"],
-                "latest_tx_hash": info["tx_hash"],
-                "latest_date": info["source_date"],
-                "fetch_status": "pending",
-                "http_status": None,
-                "last_checked_at": now_iso,
-                "updated_at": now_iso,
-            }
 
     return profiles
 
@@ -320,15 +222,15 @@ class PoolProfileJob:
                 existing = _load_existing_profile(self.config)
             summary["profiles_before"] = len(existing)
 
-            pools = _read_pools(self.config)
-            summary["pools_read"] = len(pools)
+            pool_hashes = _read_pools(self.config)
+            summary["pools_read"] = len(pool_hashes)
 
-            if len(pools) == 0:
+            if not pool_hashes:
                 logger.info("No pools to process")
                 summary["profiles_after"] = len(existing)
                 return summary
 
-            profiles = _build_profiles(pools, existing, self.config, dry_run=dry_run)
+            profiles = _build_profiles(pool_hashes, existing, self.config, dry_run=dry_run)
             summary["profiles_after"] = len(profiles)
 
             if not dry_run:

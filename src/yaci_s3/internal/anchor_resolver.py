@@ -37,7 +37,6 @@ class PoolMetadataResult:
     homepage: Optional[str] = None
     metadata_url: Optional[str] = None
     metadata_hash: Optional[str] = None
-    http_status: Optional[int] = None
     success: bool = False
     error: Optional[str] = None
 
@@ -168,12 +167,11 @@ def resolve_pool_metadata(
     data, status, error = _blockfrost_get(url, project_id, timeout, rate_limiter)
 
     if error:
-        return PoolMetadataResult(pool_hash=pool_id, http_status=status, error=error)
+        return PoolMetadataResult(pool_hash=pool_id, error=error)
 
     result = PoolMetadataResult(
         pool_hash=pool_id,
         pool_id=data.get("pool_id"),  # bech32 pool_id from Blockfrost
-        http_status=status,
         ticker=data.get("ticker"),
         name=data.get("name"),
         description=data.get("description"),

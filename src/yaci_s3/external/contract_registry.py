@@ -376,8 +376,7 @@ class ContractRegistryExporter(ExternalExporter):
             ("sub_category", pa.string()),
             ("purpose", pa.string()),
             ("language", pa.string()),
-            ("insert_datetime", pa.string()),
-            ("update_datetime", pa.string()),
+            ("fetched_at", pa.string()),
         ])
 
         arrays = {
@@ -388,8 +387,7 @@ class ContractRegistryExporter(ExternalExporter):
             "sub_category": pa.array([r["sub_category"] for r in records]),
             "purpose": pa.array([r["purpose"] for r in records]),
             "language": pa.array([r["language"] for r in records]),
-            "insert_datetime": pa.array([now] * len(records)),
-            "update_datetime": pa.array([now] * len(records)),
+            "fetched_at": pa.array([now] * len(records)),
         }
 
         return pa.table(arrays, schema=schema)
