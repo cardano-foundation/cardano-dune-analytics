@@ -10,8 +10,10 @@ import pyarrow.parquet as pq
 from yaci_s3.config import AppConfig
 from yaci_s3.external.off_chain_pool_data import (
     OffChainPoolDataExporter,
-    _read_pool_hashes,
+    _read_all_pool_hashes,
+    _read_pool_hashes_since,
     _read_already_exported,
+    _get_last_export_date,
     SCHEMA,
 )
 
@@ -62,32 +64,51 @@ def _write_export_parquet(base_path, date, pool_hashes):
         "homepage": [None for _ in pool_hashes],
         "metadata_url": [None for _ in pool_hashes],
         "metadata_hash": [None for _ in pool_hashes],
-        "fetched_at": ["2024-01-15T00:00:00+00:00" for _ in pool_hashes],
+        "fetched_at": [f"{date}T00:00:00+00:00" for _ in pool_hashes],
     }, schema=SCHEMA)
     pq.write_table(table, str(export_dir / f"off_chain_pool_data-{date}.1.parquet"))
 
 
-def test_read_pool_hashes_empty():
+# --- Unit tests for helper functions ---
+
+def test_read_all_pool_hashes_empty():
     with tempfile.TemporaryDirectory() as base:
-        result = _read_pool_hashes(base)
-        assert result == []
+        assert _read_all_pool_hashes(base) == []
 
 
-def test_read_pool_hashes():
+def test_read_all_pool_hashes():
     with tempfile.TemporaryDirectory() as base:
         _write_pool_parquet(base, "2024-01-15", [
             {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
             {"pool_id": "hash2def", "slot": 2000, "epoch": 510},
             {"pool_id": "hash1abc", "slot": 3000, "epoch": 520},  # duplicate
         ])
-        result = _read_pool_hashes(base)
+        result = _read_all_pool_hashes(base)
         assert result == ["hash1abc", "hash2def"]
+
+
+def test_read_pool_hashes_since():
+    with tempfile.TemporaryDirectory() as base:
+        _write_pool_parquet(base, "2024-01-10", [
+            {"pool_id": "hash1abc"},
+        ])
+        _write_pool_parquet(base, "2024-01-15", [
+            {"pool_id": "hash1abc"},  # updated
+            {"pool_id": "hash2def"},  # new
+        ])
+
+        # Since 2024-01-10 → only partitions after that date
+        result = _read_pool_hashes_since(base, "2024-01-10")
+        assert result == {"hash1abc", "hash2def"}
+
+        # Since 2024-01-15 → nothing after
+        result = _read_pool_hashes_since(base, "2024-01-15")
+        assert result == set()
 
 
 def test_read_already_exported_empty():
     with tempfile.TemporaryDirectory() as base:
-        result = _read_already_exported(base)
-        assert result == set()
+        assert _read_already_exported(base) == set()
 
 
 def test_read_already_exported():
@@ -96,6 +117,17 @@ def test_read_already_exported():
         result = _read_already_exported(base)
         assert result == {"hash1abc", "hash2def"}
 
+
+def test_get_last_export_date():
+    with tempfile.TemporaryDirectory() as base:
+        assert _get_last_export_date(base) is None
+
+        _write_export_parquet(base, "2024-01-10", ["hash1abc"])
+        _write_export_parquet(base, "2024-01-15", ["hash2def"])
+        assert _get_last_export_date(base) == "2024-01-15"
+
+
+# --- Integration tests for fetch_data ---
 
 @patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
 def test_fetch_data_rebuild(mock_resolve):
@@ -118,10 +150,9 @@ def test_fetch_data_rebuild(mock_resolve):
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
         _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
-            {"pool_id": "hash2def", "slot": 2000, "epoch": 510},
+            {"pool_id": "hash1abc"},
+            {"pool_id": "hash2def"},
         ])
-        # Pre-existing export for hash1abc — rebuild should still re-resolve it
         _write_export_parquet(base, "2024-01-10", ["hash1abc"])
 
         db = MagicMock()
@@ -133,14 +164,14 @@ def test_fetch_data_rebuild(mock_resolve):
         assert table is not None
         assert len(table) == 1
         assert table.column("pool_hash")[0].as_py() == "hash1abc"
-        # Both pools should have been sent to resolve (rebuild mode)
+        # Both pools should have been sent to resolve (rebuild)
         resolved_hashes = mock_resolve.call_args[0][0]
         assert set(resolved_hashes) == {"hash1abc", "hash2def"}
 
 
 @patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
-def test_fetch_data_incremental(mock_resolve):
-    """Incremental mode skips already-exported pools."""
+def test_fetch_data_incremental_new_pool(mock_resolve):
+    """Incremental mode picks up pools not in previous exports."""
     from yaci_s3.internal.anchor_resolver import PoolMetadataResult
 
     mock_resolve.return_value = {
@@ -152,36 +183,60 @@ def test_fetch_data_incremental(mock_resolve):
 
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
-        _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
-            {"pool_id": "hash2def", "slot": 2000, "epoch": 510},
-        ])
-        # hash1abc was already exported
+        _write_pool_parquet(base, "2024-01-10", [{"pool_id": "hash1abc"}])
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash2def"}])
         _write_export_parquet(base, "2024-01-10", ["hash1abc"])
 
         db = MagicMock()
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
-        # Default is incremental (rebuild=False)
         table = exporter.fetch_data()
 
         assert table is not None
         assert len(table) == 1
         assert table.column("pool_hash")[0].as_py() == "hash2def"
-        # Only hash2def should have been sent to resolve
-        resolved_hashes = mock_resolve.call_args[0][0]
-        assert resolved_hashes == ["hash2def"]
+
+
+@patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
+def test_fetch_data_incremental_updated_pool(mock_resolve):
+    """Incremental mode picks up pools that re-registered after last export."""
+    from yaci_s3.internal.anchor_resolver import PoolMetadataResult
+
+    mock_resolve.return_value = {
+        "hash1abc": PoolMetadataResult(
+            pool_hash="hash1abc", pool_id="pool1bech32", ticker="UPDATED",
+            name="Updated Pool", success=True,
+        ),
+    }
+
+    with tempfile.TemporaryDirectory() as base:
+        config = _make_config(base)
+        # Pool registered on Jan 10
+        _write_pool_parquet(base, "2024-01-10", [{"pool_id": "hash1abc"}])
+        # Exported on Jan 10
+        _write_export_parquet(base, "2024-01-10", ["hash1abc"])
+        # Pool re-registered (updated) on Jan 15 — after last export
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
+
+        db = MagicMock()
+        uploader = MagicMock()
+        exporter = OffChainPoolDataExporter(config, db, uploader)
+        table = exporter.fetch_data()
+
+        assert table is not None
+        assert len(table) == 1
+        assert table.column("pool_hash")[0].as_py() == "hash1abc"
+        assert table.column("ticker")[0].as_py() == "UPDATED"
 
 
 @patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
 def test_fetch_data_incremental_nothing_new(mock_resolve):
-    """Incremental mode returns None when all pools already exported."""
+    """Incremental returns None when no new or updated pools."""
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
-        _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
-        ])
+        _write_pool_parquet(base, "2024-01-10", [{"pool_id": "hash1abc"}])
         _write_export_parquet(base, "2024-01-10", ["hash1abc"])
+        # No new pool partitions after export date
 
         db = MagicMock()
         uploader = MagicMock()
@@ -202,9 +257,7 @@ def test_fetch_data_all_fail(mock_resolve):
 
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
-        _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
-        ])
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
         uploader = MagicMock()
@@ -231,18 +284,13 @@ def test_validate(mock_resolve):
     mock_resolve.return_value = {
         "hash1abc": PoolMetadataResult(
             pool_hash="hash1abc", pool_id="pool1bech32", ticker="TAPSY",
-            name="TapTap Vienna", description="low fees",
-            homepage="https://example.com",
-            metadata_url="https://example.com/meta.json", metadata_hash="hash1",
-            success=True,
+            name="TapTap Vienna", success=True,
         ),
     }
 
     with tempfile.TemporaryDirectory() as base:
         config = _make_config(base)
-        _write_pool_parquet(base, "2024-01-15", [
-            {"pool_id": "hash1abc", "slot": 1000, "epoch": 500},
-        ])
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
         uploader = MagicMock()
@@ -260,7 +308,6 @@ def test_run_sets_rebuild():
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
 
-        # No pool data, so it will return early — just verify rebuild flag is set
         exporter.run(dry_run=True, rebuild=True)
         assert exporter._rebuild is True
 

@@ -1,10 +1,11 @@
 """Off-chain pool data exporter - fetches pool metadata from Blockfrost."""
 
 import logging
+import re
 from datetime import datetime, timezone
 from glob import glob as pyglob
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
 
 import duckdb
 import pyarrow as pa
@@ -31,8 +32,10 @@ SCHEMA = pa.schema([
     ("fetched_at", pa.string()),
 ])
 
+DATE_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
 
-def _read_pool_hashes(base_data_path: str) -> list:
+
+def _read_all_pool_hashes(base_data_path: str) -> list:
     """Read pool parquet files and return list of distinct pool hashes."""
     pool_dir = Path(base_data_path) / "pool"
 
@@ -64,7 +67,62 @@ def _read_pool_hashes(base_data_path: str) -> list:
     return pool_hashes
 
 
-def _read_already_exported(base_data_path: str) -> set:
+def _read_pool_hashes_since(base_data_path: str, since_date: str) -> set:
+    """Read pool hashes from pool parquet partitions after since_date.
+
+    Returns the set of pool hashes that appear in date partitions > since_date.
+    These are pools that were newly registered or updated.
+    """
+    pool_dir = Path(base_data_path) / "pool"
+    if not pool_dir.is_dir():
+        return set()
+
+    all_files = sorted(pyglob(f"{base_data_path}/pool/date=*/*.parquet"))
+    # Filter to files with date > since_date
+    new_files = []
+    for f in all_files:
+        m = DATE_RE.search(f)
+        if m and m.group(1) > since_date:
+            new_files.append(f)
+
+    if not new_files:
+        return set()
+
+    logger.info("Reading %d new pool file(s) since %s", len(new_files), since_date)
+
+    conn = duckdb.connect(":memory:")
+    try:
+        result = conn.execute(
+            "SELECT DISTINCT pool_id FROM read_parquet(?)",
+            [new_files],
+        ).fetchall()
+    except Exception as e:
+        logger.error("DuckDB read failed: %s", e)
+        return set()
+    finally:
+        conn.close()
+
+    hashes = {row[0] for row in result}
+    logger.info("Found %d pools in new partitions", len(hashes))
+    return hashes
+
+
+def _get_last_export_date(base_data_path: str) -> Optional[str]:
+    """Get the latest date from existing off_chain_pool_data exports."""
+    export_dir = Path(base_data_path) / "off_chain_pool_data"
+    if not export_dir.is_dir():
+        return None
+
+    dates = []
+    for d in export_dir.iterdir():
+        m = DATE_RE.search(d.name)
+        if m:
+            dates.append(m.group(1))
+
+    return max(dates) if dates else None
+
+
+def _read_already_exported(base_data_path: str) -> Set[str]:
     """Read pool_hash values from existing off_chain_pool_data parquet exports."""
     export_dir = Path(base_data_path) / "off_chain_pool_data"
     if not export_dir.is_dir():
@@ -91,8 +149,10 @@ class OffChainPoolDataExporter(ExternalExporter):
     """Exports pool off-chain metadata from Blockfrost.
 
     Supports two modes:
-    - rebuild: resolve ALL unique pools from on-chain data
-    - incremental (default): only resolve pools not already in previous exports
+    - rebuild (--rebuild): resolve ALL unique pools from on-chain data
+    - incremental (default): resolve only new/updated pools since last export
+      - New pools: pool_hash not in any previous export
+      - Updated pools: pool_hash appears in pool date partitions after last export date
     """
 
     name = "off_chain_pool_data"
@@ -102,28 +162,17 @@ class OffChainPoolDataExporter(ExternalExporter):
         self._rebuild = False
 
     def fetch_data(self) -> Optional[pa.Table]:
-        """Read on-chain pool hashes and resolve metadata via Blockfrost.
-
-        In incremental mode, skips pools already present in previous exports.
-        """
-        all_pool_hashes = _read_pool_hashes(self.config.base_data_path)
-        if not all_pool_hashes:
-            return None
-
+        """Read on-chain pool hashes and resolve metadata via Blockfrost."""
         if self._rebuild:
-            pools_to_resolve = all_pool_hashes
+            pools_to_resolve = _read_all_pool_hashes(self.config.base_data_path)
+            if not pools_to_resolve:
+                return None
             logger.info("[REBUILD] Resolving all %d pools", len(pools_to_resolve))
         else:
-            already_exported = _read_already_exported(self.config.base_data_path)
-            pools_to_resolve = [h for h in all_pool_hashes if h not in already_exported]
-            logger.info(
-                "Incremental: %d total pools, %d already exported, %d to resolve",
-                len(all_pool_hashes), len(already_exported), len(pools_to_resolve),
-            )
-
-        if not pools_to_resolve:
-            logger.info("No new pools to resolve")
-            return None
+            pools_to_resolve = self._find_incremental_pools()
+            if not pools_to_resolve:
+                logger.info("No new or updated pools to resolve")
+                return None
 
         results = resolve_pool_batch(
             pools_to_resolve,
@@ -161,6 +210,39 @@ class OffChainPoolDataExporter(ExternalExporter):
         arrays = {col.name: pa.array([r[col.name] for r in rows], type=col.type)
                   for col in SCHEMA}
         return pa.table(arrays, schema=SCHEMA)
+
+    def _find_incremental_pools(self) -> list:
+        """Find pools that need resolution: new pools + updated pools."""
+        base = self.config.base_data_path
+
+        # Get all pool hashes and previously exported ones
+        all_hashes = set(_read_all_pool_hashes(base))
+        if not all_hashes:
+            return []
+
+        already_exported = _read_already_exported(base)
+
+        # New pools: not in any previous export
+        new_pools = all_hashes - already_exported
+
+        # Updated pools: appear in pool partitions after last export date
+        updated_pools = set()
+        last_export_date = _get_last_export_date(base)
+        if last_export_date:
+            changed_pools = _read_pool_hashes_since(base, last_export_date)
+            # Only count as updated if they were already exported (otherwise they're new)
+            updated_pools = changed_pools & already_exported
+
+        pools_to_resolve = sorted(new_pools | updated_pools)
+
+        logger.info(
+            "Incremental: %d total on-chain, %d already exported, "
+            "%d new, %d updated, %d to resolve",
+            len(all_hashes), len(already_exported),
+            len(new_pools), len(updated_pools), len(pools_to_resolve),
+        )
+
+        return pools_to_resolve
 
     def run(self, dry_run: bool = False, rebuild: bool = False) -> dict:
         """Run the exporter. Set rebuild=True to re-resolve all pools."""
