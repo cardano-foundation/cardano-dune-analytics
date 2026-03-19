@@ -164,6 +164,7 @@ External exporters fetch data from HTTP APIs (not PostgreSQL), produce parquet f
 |----------|--------|----------|-------------|
 | `asset_data` | Minswap API | Every 2 hours | Full snapshot of all verified Cardano tokens with price data |
 | `contract_registry` | GitHub repos | Daily | Incremental export of new smart contract script hashes |
+| `off_chain_pool_data` | Blockfrost API | Daily | Pool off-chain metadata (ticker, name, homepage). Supports `--rebuild` for full resolution |
 
 ```bash
 # Run a single external exporter
@@ -222,44 +223,45 @@ uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-0
 uv run yaci-s3 --internal drep_profile --rebuild --dry-run
 ```
 
-### Pool Profile (Internal Job)
+### Off-Chain Pool Data (External Exporter)
 
-The pool profile builder creates a persistent lookup table at `{BASE_DATA_PATH}/pool_profile/pool_profile.parquet` containing one row per `pool_id` with resolved off-chain metadata (ticker, name, description, homepage) via the Blockfrost API.
+Fetches pool off-chain metadata (ticker, name, description, homepage) from the Blockfrost API and exports as date-partitioned parquet files with S3 upload.
 
-**Profile schema:**
+**Schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `pool_id` | string | Pool hash (primary key) |
+| `pool_hash` | string | Pool hash hex (primary key) |
+| `pool_id` | string | Bech32 pool ID from Blockfrost |
 | `ticker` | string | Pool ticker (e.g. `TAPSY`) |
 | `name` | string | Pool display name |
 | `description` | string | Pool description |
 | `homepage` | string | Pool homepage URL |
 | `metadata_url` | string | URL of the off-chain metadata JSON |
 | `metadata_hash` | string | Hash of the metadata content |
-| `latest_status` | string | Latest on-chain status (`REGISTRATION`, `UPDATE`, `RETIRED`) |
-| `latest_epoch` | int64 | Epoch of the latest on-chain event |
-| `latest_slot` | int64 | Slot of the latest on-chain event |
-| `latest_tx_hash` | string | Tx hash of the latest on-chain event |
-| `latest_date` | string | Date partition of the latest on-chain event |
-| `fetch_status` | string | `success` or `failed` |
-| `http_status` | int32 | HTTP status code from the Blockfrost call |
-| `last_checked_at` | string | ISO timestamp of last resolution attempt |
-| `updated_at` | string | ISO timestamp of last profile update |
+| `fetched_at` | string | ISO timestamp of when metadata was fetched |
 
-**Update logic:**
-- Reads all unique `pool_id`s from the `pool` parquet (includes active and retired pools)
-- For each pool, queries Blockfrost's `/pools/{pool_id}/metadata` endpoint for ticker, name, description, homepage
-- Never overwrites a good profile with a failed resolution — keeps the existing metadata if new resolution fails
-- Uses token-bucket rate limiting (10 req/s, 500 burst) to stay within Blockfrost API limits
+**Two modes:**
+
+- **Rebuild** (`--rebuild`): Resolves ALL unique pools from on-chain pool parquet data
+- **Incremental** (default): Only resolves new and updated pools by comparing pool date partitions against the last export date
+  - **New pools**: pool_hash not in any previous export
+  - **Updated pools**: pool_hash appears in pool partitions after the last export date (re-registrations)
+
+Only successfully resolved pools are included — failed resolutions are skipped.
 
 ```bash
-# Rebuild from scratch (all pools)
-uv run yaci-s3 --internal pool_profile --rebuild
+# Initial build — resolve all pools
+uv run yaci-s3 --external off_chain_pool_data --rebuild
 
-# Dry run (show what would change, don't write)
-uv run yaci-s3 --internal pool_profile --rebuild --dry-run
+# Daily incremental — new + updated pools only
+uv run yaci-s3 --external off_chain_pool_data
+
+# Write parquet locally without uploading to S3
+uv run yaci-s3 --external off_chain_pool_data --dry-run
 ```
+
+**S3 path:** `off_chain_pool_data/{YYYY-MM-DD}/off_chain_pool_data-{YYYY-MM-DD}.{N}.parquet`
 
 ### Hybrid Exporters
 
@@ -333,12 +335,12 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | `--dry-run` | Validate only, skip actual S3 uploads |
 | `--skip-validation` | Skip PostgreSQL validation checks |
 | `--rebuild-tracking` | Rebuild SQLite tracking DB from S3 bucket listing |
-| `--external NAME` | Run a single external exporter (`asset_data` or `contract_registry`) |
+| `--external NAME` | Run a single external exporter (`asset_data`, `contract_registry`, or `off_chain_pool_data`) |
 | `--external-all` | Run all external exporters |
 | `--hybrid NAME` | Run a single hybrid exporter (e.g. `drep_dist_enriched`) |
 | `--hybrid-all` | Run all hybrid exporters |
 | `--internal NAME` | Run an internal job (e.g. `drep_profile`) |
-| `--rebuild` | Rebuild from scratch (for internal jobs) |
+| `--rebuild` | Rebuild from scratch (for internal jobs and `off_chain_pool_data`) |
 | `--date YYYY-MM-DD` | Process a specific date (for internal jobs) |
 | `--start-date YYYY-MM-DD` | Start date for internal job date range |
 | `--end-date YYYY-MM-DD` | End date for internal job date range |
@@ -367,8 +369,9 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | Update DRep profile for one day | `uv run yaci-s3 --internal drep_profile --date 2024-01-15` |
 | Update DRep profile for date range | `uv run yaci-s3 --internal drep_profile --start-date 2024-01-01 --end-date 2024-01-31` |
 | Dry run DRep profile rebuild | `uv run yaci-s3 --internal drep_profile --rebuild --dry-run` |
-| Build pool profile from scratch | `uv run yaci-s3 --internal pool_profile --rebuild` |
-| Dry run pool profile rebuild | `uv run yaci-s3 --internal pool_profile --rebuild --dry-run` |
+| Build pool metadata from scratch | `uv run yaci-s3 --external off_chain_pool_data --rebuild` |
+| Incremental pool metadata (new + updated) | `uv run yaci-s3 --external off_chain_pool_data` |
+| Dry run pool metadata (write locally, no S3) | `uv run yaci-s3 --external off_chain_pool_data --dry-run` |
 | Enrich all new drep_dist epochs | `uv run yaci-s3 --hybrid drep_dist_enriched` |
 | Enrich a specific epoch | `uv run yaci-s3 --hybrid drep_dist_enriched --partition 611` |
 | Run all hybrid exporters | `uv run yaci-s3 --hybrid-all` |
@@ -598,13 +601,13 @@ src/yaci_s3/
     external/
         __init__.py          # External exporter registry
         base.py              # ExternalExporter ABC (fetch -> write -> upload)
-        asset_data.py        # Minswap API client + exporter
-        contract_registry.py # GitHub client + parsers + incremental exporter
+        asset_data.py            # Minswap API client + exporter
+        contract_registry.py     # GitHub client + parsers + incremental exporter
+        off_chain_pool_data.py   # Blockfrost pool metadata (rebuild + incremental)
     internal/
         __init__.py          # Internal job registry
         anchor_resolver.py   # Blockfrost API client (DRep + pool metadata, rate limiter)
         drep_profile.py      # DRep profile builder (DuckDB + Blockfrost resolution)
-        pool_profile.py      # Pool profile builder (DuckDB + Blockfrost resolution)
     hybrid/
         __init__.py          # Hybrid exporter registry
         base.py              # HybridExporter ABC (scan + enrich + upload)
