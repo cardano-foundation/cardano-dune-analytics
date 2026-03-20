@@ -2,13 +2,18 @@
 
 import json
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from yaci_s3.config import AppConfig
 from yaci_s3.db import TrackingDB
 from yaci_s3.external.contract_registry import (
     ContractRegistryExporter,
     GitHubClient,
+    _read_max_versions,
     parse_stricahq_project,
     parse_crfa_v2_project,
     parse_crfa_v1_project,
@@ -304,3 +309,116 @@ class TestParsers:
         assert parse_stricahq_project("not json", "test.json") == []
         assert parse_crfa_v2_project("{bad", "test.json") == []
         assert parse_crfa_v1_project("", "test.json") == []
+
+
+# ---------------------------------------------------------------------------
+# Version column tests
+# ---------------------------------------------------------------------------
+
+def _write_contract_registry_parquet(base_path, date, script_hashes, versions=None):
+    """Write a fake contract_registry export parquet."""
+    if versions is None:
+        versions = [1 for _ in script_hashes]
+    export_dir = Path(base_path) / "contract_registry" / f"date={date}"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    table = pa.table({
+        "script_hash": script_hashes,
+        "project_name": ["proj" for _ in script_hashes],
+        "contract_name": ["c" for _ in script_hashes],
+        "category": ["" for _ in script_hashes],
+        "sub_category": ["" for _ in script_hashes],
+        "purpose": ["" for _ in script_hashes],
+        "language": ["" for _ in script_hashes],
+        "fetched_at": [f"{date}T00:00:00+00:00" for _ in script_hashes],
+        "version": versions,
+    })
+    pq.write_table(table, str(export_dir / f"contract_registry-{date}.parquet"))
+
+
+class TestVersionColumn:
+
+    def test_read_max_versions_empty(self):
+        with tempfile.TemporaryDirectory() as base:
+            assert _read_max_versions(base) == {}
+
+    def test_read_max_versions(self):
+        with tempfile.TemporaryDirectory() as base:
+            _write_contract_registry_parquet(base, "2024-01-10", ["hash_a", "hash_b"], [1, 1])
+            _write_contract_registry_parquet(base, "2024-01-15", ["hash_a"], [2])
+
+            result = _read_max_versions(base)
+            assert result == {"hash_a": 2, "hash_b": 1}
+
+    def test_first_export_gets_version_one(self):
+        """First-ever export of a hash should get version=1."""
+        with tempfile.TemporaryDirectory() as base:
+            exporter = TestFetchDataChangedFiles()._make_exporter(base)
+
+            exporter.client.get_latest_commit_sha.return_value = "new_sha"
+            exporter.client.get_tree.return_value = [
+                {"path": "projects/foo.json", "type": "blob"},
+            ]
+            exporter.client.get_file_content.return_value = _stricahq_json(
+                "FooProject", [("hash_a", "ContractA")]
+            )
+
+            table = exporter.fetch_data()
+            assert table is not None
+            assert table.column("version").to_pylist() == [1]
+
+    def test_re_export_increments_version(self):
+        """Re-exporting a hash increments version from existing parquet."""
+        with tempfile.TemporaryDirectory() as base:
+            # Write existing parquet with version=1
+            _write_contract_registry_parquet(base, "2024-01-10", ["hash_a"], [1])
+
+            exporter = TestFetchDataChangedFiles()._make_exporter(base)
+
+            exporter.db.update_contract_registry_state("stricahq", "old_sha")
+            exporter.db.update_contract_registry_state("crfa_v2", "unchanged_sha")
+            exporter.db.update_contract_registry_state("crfa_v1", "unchanged_sha")
+
+            def latest_sha(owner, repo, branch):
+                if owner == "StricaHQ":
+                    return "new_sha"
+                return "unchanged_sha"
+
+            exporter.client.get_latest_commit_sha.side_effect = latest_sha
+            exporter.client.get_changed_files.return_value = ["projects/foo.json"]
+            exporter.client.get_file_content.return_value = _stricahq_json(
+                "UpdatedProject", [("hash_a", "ContractA")]
+            )
+
+            table = exporter.fetch_data()
+            assert table is not None
+            assert table.column("version").to_pylist() == [2]
+
+    def test_mixed_new_and_existing_versions(self):
+        """New hash gets v1, existing hash gets max+1."""
+        with tempfile.TemporaryDirectory() as base:
+            _write_contract_registry_parquet(base, "2024-01-10", ["hash_a"], [3])
+
+            exporter = TestFetchDataChangedFiles()._make_exporter(base)
+
+            exporter.db.update_contract_registry_state("stricahq", "old_sha")
+            exporter.db.update_contract_registry_state("crfa_v2", "unchanged_sha")
+            exporter.db.update_contract_registry_state("crfa_v1", "unchanged_sha")
+
+            def latest_sha(owner, repo, branch):
+                if owner == "StricaHQ":
+                    return "new_sha"
+                return "unchanged_sha"
+
+            exporter.client.get_latest_commit_sha.side_effect = latest_sha
+            exporter.client.get_changed_files.return_value = ["projects/foo.json"]
+            exporter.client.get_file_content.return_value = _stricahq_json(
+                "Project", [("hash_a", "ContractA"), ("hash_new", "ContractB")]
+            )
+
+            table = exporter.fetch_data()
+            assert table is not None
+            hashes = table.column("script_hash").to_pylist()
+            versions = table.column("version").to_pylist()
+            version_map = dict(zip(hashes, versions))
+            assert version_map["hash_a"] == 4
+            assert version_map["hash_new"] == 1

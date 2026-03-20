@@ -132,7 +132,7 @@ class AssetDataExporter(ExternalExporter):
         if not raw_assets:
             return None
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
 
         rows = []
         for metric in raw_assets:
@@ -161,7 +161,7 @@ class AssetDataExporter(ExternalExporter):
             ("created_at", pa.string()),
             ("categories", pa.string()),
             ("price", pa.float64()),
-            ("fetched_at", pa.string()),
+            ("fetched_at", pa.timestamp('us', tz='UTC')),
         ])
 
         arrays = {col.name: pa.array([r[col.name] for r in rows], type=col.type)

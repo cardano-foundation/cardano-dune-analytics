@@ -1,6 +1,7 @@
 """Tests for off-chain pool data exporter."""
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -13,6 +14,7 @@ from yaci_s3.external.off_chain_pool_data import (
     _read_all_pool_hashes,
     _read_pool_hashes_since,
     _read_already_exported,
+    _read_max_versions,
     _get_last_export_date,
     SCHEMA,
 )
@@ -28,8 +30,8 @@ def _make_config(base_path):
 
 
 def _write_pool_parquet(base_path, date, rows):
-    """Write a pool parquet file for a given date."""
-    pool_dir = Path(base_path) / "pool" / f"date={date}"
+    """Write a pool_registration parquet file for a given date."""
+    pool_dir = Path(base_path) / "pool_registration" / f"date={date}"
     pool_dir.mkdir(parents=True, exist_ok=True)
     table = pa.table({
         "pool_id": [r["pool_id"] for r in rows],
@@ -48,11 +50,13 @@ def _write_pool_parquet(base_path, date, rows):
         "block_time": [1700000000 for r in rows],
         "date": [date for r in rows],
     })
-    pq.write_table(table, str(pool_dir / f"pool-{date}.parquet"))
+    pq.write_table(table, str(pool_dir / f"pool_registration-{date}.parquet"))
 
 
-def _write_export_parquet(base_path, date, pool_hashes):
+def _write_export_parquet(base_path, date, pool_hashes, versions=None):
     """Write a fake off_chain_pool_data export parquet."""
+    if versions is None:
+        versions = [1 for _ in pool_hashes]
     export_dir = Path(base_path) / "off_chain_pool_data" / f"date={date}"
     export_dir.mkdir(parents=True, exist_ok=True)
     table = pa.table({
@@ -64,7 +68,8 @@ def _write_export_parquet(base_path, date, pool_hashes):
         "homepage": [None for _ in pool_hashes],
         "metadata_url": [None for _ in pool_hashes],
         "metadata_hash": [None for _ in pool_hashes],
-        "fetched_at": [f"{date}T00:00:00+00:00" for _ in pool_hashes],
+        "fetched_at": [datetime(2024, 1, 1, tzinfo=timezone.utc) for _ in pool_hashes],
+        "version": versions,
     }, schema=SCHEMA)
     pq.write_table(table, str(export_dir / f"off_chain_pool_data-{date}.1.parquet"))
 
@@ -313,3 +318,102 @@ def test_run_sets_rebuild():
 
         exporter.run(dry_run=True, rebuild=False)
         assert exporter._rebuild is False
+
+
+# --- Version column tests ---
+
+def test_read_max_versions_empty():
+    with tempfile.TemporaryDirectory() as base:
+        assert _read_max_versions(base) == {}
+
+
+def test_read_max_versions():
+    with tempfile.TemporaryDirectory() as base:
+        _write_export_parquet(base, "2024-01-10", ["hash1abc", "hash2def"], [1, 1])
+        _write_export_parquet(base, "2024-01-15", ["hash1abc"], [2])
+
+        result = _read_max_versions(base)
+        assert result == {"hash1abc": 2, "hash2def": 1}
+
+
+@patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
+def test_version_rebuild_always_one(mock_resolve):
+    """Rebuild mode sets version=1 for all rows."""
+    from yaci_s3.internal.anchor_resolver import PoolMetadataResult
+
+    mock_resolve.return_value = {
+        "hash1abc": PoolMetadataResult(
+            pool_hash="hash1abc", pool_id="pool1bech32", ticker="TAPSY",
+            name="Pool", success=True,
+        ),
+    }
+
+    with tempfile.TemporaryDirectory() as base:
+        config = _make_config(base)
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
+        # Pre-existing export with version=3
+        _write_export_parquet(base, "2024-01-10", ["hash1abc"], [3])
+
+        db = MagicMock()
+        uploader = MagicMock()
+        exporter = OffChainPoolDataExporter(config, db, uploader)
+        exporter._rebuild = True
+        table = exporter.fetch_data()
+
+        assert table is not None
+        assert table.column("version").to_pylist() == [1]
+
+
+@patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
+def test_version_incremental_increments(mock_resolve):
+    """Incremental mode increments version from existing max."""
+    from yaci_s3.internal.anchor_resolver import PoolMetadataResult
+
+    mock_resolve.return_value = {
+        "hash1abc": PoolMetadataResult(
+            pool_hash="hash1abc", pool_id="pool1bech32", ticker="UPDATED",
+            name="Updated Pool", success=True,
+        ),
+    }
+
+    with tempfile.TemporaryDirectory() as base:
+        config = _make_config(base)
+        _write_pool_parquet(base, "2024-01-10", [{"pool_id": "hash1abc"}])
+        _write_export_parquet(base, "2024-01-10", ["hash1abc"], [2])
+        # Pool re-registered after export
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
+
+        db = MagicMock()
+        uploader = MagicMock()
+        exporter = OffChainPoolDataExporter(config, db, uploader)
+        table = exporter.fetch_data()
+
+        assert table is not None
+        assert table.column("version").to_pylist() == [3]
+
+
+@patch("yaci_s3.external.off_chain_pool_data.resolve_pool_batch")
+def test_version_new_pool_gets_one(mock_resolve):
+    """A brand new pool gets version=1 in incremental mode."""
+    from yaci_s3.internal.anchor_resolver import PoolMetadataResult
+
+    mock_resolve.return_value = {
+        "hash2def": PoolMetadataResult(
+            pool_hash="hash2def", pool_id="pool2bech32", ticker="NEW",
+            name="New Pool", success=True,
+        ),
+    }
+
+    with tempfile.TemporaryDirectory() as base:
+        config = _make_config(base)
+        _write_pool_parquet(base, "2024-01-10", [{"pool_id": "hash1abc"}])
+        _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash2def"}])
+        _write_export_parquet(base, "2024-01-10", ["hash1abc"], [1])
+
+        db = MagicMock()
+        uploader = MagicMock()
+        exporter = OffChainPoolDataExporter(config, db, uploader)
+        table = exporter.fetch_data()
+
+        assert table is not None
+        assert table.column("version").to_pylist() == [1]

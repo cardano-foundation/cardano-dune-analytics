@@ -29,26 +29,27 @@ SCHEMA = pa.schema([
     ("homepage", pa.string()),
     ("metadata_url", pa.string()),
     ("metadata_hash", pa.string()),
-    ("fetched_at", pa.string()),
+    ("fetched_at", pa.timestamp('us', tz='UTC')),
+    ("version", pa.int32()),
 ])
 
 DATE_RE = re.compile(r"date=(\d{4}-\d{2}-\d{2})")
 
 
 def _read_all_pool_hashes(base_data_path: str) -> list:
-    """Read pool parquet files and return list of distinct pool hashes."""
-    pool_dir = Path(base_data_path) / "pool"
+    """Read pool_registration parquet files and return list of distinct pool hashes."""
+    pool_dir = Path(base_data_path) / "pool_registration"
 
     if not pool_dir.is_dir():
         logger.warning("pool directory not found: %s", pool_dir)
         return []
 
-    files_list = sorted(pyglob(f"{base_data_path}/pool/date=*/*.parquet"))
+    files_list = sorted(pyglob(f"{base_data_path}/pool_registration/date=*/*.parquet"))
     if not files_list:
-        logger.warning("No pool parquet files found")
+        logger.warning("No pool_registration parquet files found")
         return []
 
-    logger.info("Reading %d pool file(s)", len(files_list))
+    logger.info("Reading %d pool_registration file(s)", len(files_list))
 
     conn = duckdb.connect(":memory:")
     try:
@@ -68,16 +69,16 @@ def _read_all_pool_hashes(base_data_path: str) -> list:
 
 
 def _read_pool_hashes_since(base_data_path: str, since_date: str) -> set:
-    """Read pool hashes from pool parquet partitions after since_date.
+    """Read pool hashes from pool_registration partitions after since_date.
 
     Returns the set of pool hashes that appear in date partitions > since_date.
     These are pools that were newly registered or updated.
     """
-    pool_dir = Path(base_data_path) / "pool"
+    pool_dir = Path(base_data_path) / "pool_registration"
     if not pool_dir.is_dir():
         return set()
 
-    all_files = sorted(pyglob(f"{base_data_path}/pool/date=*/*.parquet"))
+    all_files = sorted(pyglob(f"{base_data_path}/pool_registration/date=*/*.parquet"))
     # Filter to files with date > since_date
     new_files = []
     for f in all_files:
@@ -88,7 +89,7 @@ def _read_pool_hashes_since(base_data_path: str, since_date: str) -> set:
     if not new_files:
         return set()
 
-    logger.info("Reading %d new pool file(s) since %s", len(new_files), since_date)
+    logger.info("Reading %d new pool_registration file(s) since %s", len(new_files), since_date)
 
     conn = duckdb.connect(":memory:")
     try:
@@ -144,6 +145,37 @@ def _read_already_exported(base_data_path: str) -> Set[str]:
     return already
 
 
+def _read_max_versions(base_data_path: str) -> dict:
+    """Read max version per pool_hash from existing exports.
+
+    Returns {pool_hash: max_version}. Handles pre-migration files without
+    a version column by treating all rows as version 1.
+    """
+    files_list = sorted(pyglob(f"{base_data_path}/off_chain_pool_data/date=*/*.parquet"))
+    if not files_list:
+        return {}
+
+    versions = {}  # pool_hash -> max_version
+    for f in files_list:
+        try:
+            schema = pq.read_schema(f)
+            if "version" in schema.names:
+                table = pq.read_table(f, columns=["pool_hash", "version"])
+                for ph, v in zip(
+                    table.column("pool_hash").to_pylist(),
+                    table.column("version").to_pylist(),
+                ):
+                    versions[ph] = max(versions.get(ph, 0), v or 1)
+            else:
+                table = pq.read_table(f, columns=["pool_hash"])
+                for ph in table.column("pool_hash").to_pylist():
+                    versions[ph] = max(versions.get(ph, 0), 1)
+        except Exception as e:
+            logger.warning("Failed to read versions from %s: %s", f, e)
+
+    return versions
+
+
 @register("off_chain_pool_data")
 class OffChainPoolDataExporter(ExternalExporter):
     """Exports pool off-chain metadata from Blockfrost.
@@ -180,13 +212,19 @@ class OffChainPoolDataExporter(ExternalExporter):
             max_workers=self.config.anchor_max_workers,
         )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+
+        if self._rebuild:
+            max_versions = {}
+        else:
+            max_versions = _read_max_versions(self.config.base_data_path)
 
         rows = []
         success_count = 0
         fail_count = 0
         for pool_hash, meta in results.items():
             if meta.success:
+                version = 1 if self._rebuild else max_versions.get(pool_hash, 0) + 1
                 rows.append({
                     "pool_hash": pool_hash,
                     "pool_id": meta.pool_id,
@@ -197,6 +235,7 @@ class OffChainPoolDataExporter(ExternalExporter):
                     "metadata_url": meta.metadata_url,
                     "metadata_hash": meta.metadata_hash,
                     "fetched_at": now,
+                    "version": version,
                 })
                 success_count += 1
             else:

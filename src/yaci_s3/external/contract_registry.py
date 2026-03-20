@@ -3,9 +3,11 @@
 import json
 import logging
 from datetime import datetime, timezone
+from glob import glob as pyglob
 from typing import List, Optional
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 
 from . import register
@@ -244,6 +246,37 @@ PARSERS = {
 }
 
 
+def _read_max_versions(base_data_path: str) -> dict:
+    """Read max version per script_hash from existing contract_registry exports.
+
+    Returns {script_hash: max_version}. Handles pre-migration files without
+    a version column by treating all rows as version 1.
+    """
+    files_list = sorted(pyglob(f"{base_data_path}/contract_registry/date=*/*.parquet"))
+    if not files_list:
+        return {}
+
+    versions = {}  # script_hash -> max_version
+    for f in files_list:
+        try:
+            schema = pq.read_schema(f)
+            if "version" in schema.names:
+                table = pq.read_table(f, columns=["script_hash", "version"])
+                for sh, v in zip(
+                    table.column("script_hash").to_pylist(),
+                    table.column("version").to_pylist(),
+                ):
+                    versions[sh] = max(versions.get(sh, 0), v or 1)
+            else:
+                table = pq.read_table(f, columns=["script_hash"])
+                for sh in table.column("script_hash").to_pylist():
+                    versions[sh] = max(versions.get(sh, 0), 1)
+        except Exception as e:
+            logger.warning("Failed to read versions from %s: %s", f, e)
+
+    return versions
+
+
 @register("contract_registry")
 class ContractRegistryExporter(ExternalExporter):
     """Exports contract registry data from GitHub repos (incremental)."""
@@ -330,8 +363,12 @@ class ContractRegistryExporter(ExternalExporter):
 
         logger.info("Exporting %d script hashes (new + updated)", len(export_records))
 
-        # Step 4: Build the Arrow table
-        now = datetime.now(timezone.utc).isoformat()
+        # Step 4: Build the Arrow table with version numbers
+        max_versions = _read_max_versions(self.config.base_data_path)
+        for r in export_records:
+            r["version"] = max_versions.get(r["script_hash"], 0) + 1
+
+        now = datetime.now(timezone.utc)
         table = self._records_to_table(export_records, now)
 
         # Step 5: Update tracking state
@@ -408,7 +445,7 @@ class ContractRegistryExporter(ExternalExporter):
 
         return records
 
-    def _records_to_table(self, records: List[dict], now: str) -> pa.Table:
+    def _records_to_table(self, records: List[dict], now: datetime) -> pa.Table:
         """Convert record dicts to a PyArrow Table."""
         schema = pa.schema([
             ("script_hash", pa.string()),
@@ -418,7 +455,8 @@ class ContractRegistryExporter(ExternalExporter):
             ("sub_category", pa.string()),
             ("purpose", pa.string()),
             ("language", pa.string()),
-            ("fetched_at", pa.string()),
+            ("fetched_at", pa.timestamp('us', tz='UTC')),
+            ("version", pa.int32()),
         ])
 
         arrays = {
@@ -430,6 +468,7 @@ class ContractRegistryExporter(ExternalExporter):
             "purpose": pa.array([r["purpose"] for r in records]),
             "language": pa.array([r["language"] for r in records]),
             "fetched_at": pa.array([now] * len(records)),
+            "version": pa.array([r["version"] for r in records], type=pa.int32()),
         }
 
         return pa.table(arrays, schema=schema)

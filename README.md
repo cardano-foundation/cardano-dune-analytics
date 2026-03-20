@@ -240,13 +240,14 @@ Fetches pool off-chain metadata (ticker, name, description, homepage) from the B
 | `metadata_url` | string | URL of the off-chain metadata JSON |
 | `metadata_hash` | string | Hash of the metadata content |
 | `fetched_at` | string | ISO timestamp of when metadata was fetched |
+| `version` | int32 | Row version number (1 = first appearance, increments on updates) |
 
 **Two modes:**
 
-- **Rebuild** (`--rebuild`): Resolves ALL unique pools from on-chain pool parquet data
-- **Incremental** (default): Only resolves new and updated pools by comparing pool date partitions against the last export date
-  - **New pools**: pool_hash not in any previous export
-  - **Updated pools**: pool_hash appears in pool partitions after the last export date (re-registrations)
+- **Rebuild** (`--rebuild`): Resolves ALL unique pools from on-chain `pool_registration` parquet data. All rows get `version=1`.
+- **Incremental** (default): Only resolves new and updated pools by comparing `pool_registration` date partitions against the last export date
+  - **New pools**: pool_hash not in any previous export — gets `version=1`
+  - **Updated pools**: pool_hash appears in pool partitions after the last export date (re-registrations) — gets `version=max(existing)+1`
 
 Only successfully resolved pools are included — failed resolutions are skipped.
 
@@ -262,6 +263,41 @@ uv run yaci-s3 --external off_chain_pool_data --dry-run
 ```
 
 **S3 path:** `off_chain_pool_data/{YYYY-MM-DD}/off_chain_pool_data-{YYYY-MM-DD}.{N}.parquet`
+
+### Contract Registry (External Exporter)
+
+Fetches smart contract script hash data from GitHub repositories and exports as date-partitioned parquet files. Uses the GitHub Compare API to only fetch changed files on incremental runs.
+
+**Schema:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `script_hash` | string | Contract script hash (primary key) |
+| `project_name` | string | Project name from the registry |
+| `contract_name` | string | Individual contract/script name |
+| `category` | string | Project category (e.g. DEX, DeFi) |
+| `sub_category` | string | Project subcategory |
+| `purpose` | string | Script purpose (e.g. spend) |
+| `language` | string | Contract language (e.g. Plutus, PlutusV2) |
+| `fetched_at` | string | ISO timestamp of when data was fetched |
+| `version` | int32 | Row version number (1 = first appearance, increments on updates) |
+
+**Sources** (checked in priority order — highest priority wins when same script_hash appears in multiple):
+1. **StricaHQ** — `StricaHQ/cardano-contracts-registry` (master, `projects/`)
+2. **CRFA v2** — `mezuny/crfa-offchain-data-registry` (main, `dApps_v2/`)
+3. **CRFA v1** — `mezuny/crfa-offchain-data-registry` (main, `dApps/`)
+
+**Versioning:** On each export, the exporter reads existing parquet files to find the max version per script_hash. New hashes get `version=1`. Re-exported hashes (metadata updates) get `version=max(existing)+1`.
+
+```bash
+# Daily incremental (only changed files since last commit)
+uv run yaci-s3 --external contract_registry
+
+# Dry run
+uv run yaci-s3 --external contract_registry --dry-run
+```
+
+**S3 path:** `contract_registry/{YYYY-MM-DD}/contract_registry-{YYYY-MM-DD}.parquet`
 
 ### Hybrid Exporters
 
