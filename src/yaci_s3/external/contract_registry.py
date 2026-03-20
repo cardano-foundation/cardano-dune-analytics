@@ -16,7 +16,7 @@ from ..config import AppConfig
 from ..db import TrackingDB
 from ..uploader import S3Uploader
 
-logger = logging.getLogger("yaci_s3.external.contract_registry")
+logger = logging.getLogger("yaci_s3.external.smart_contract_registry")
 
 # Sources in priority order (highest first)
 SOURCES = [
@@ -252,7 +252,7 @@ def _read_max_versions(base_data_path: str) -> dict:
     Returns {script_hash: max_version}. Handles pre-migration files without
     a version column by treating all rows as version 1.
     """
-    files_list = sorted(pyglob(f"{base_data_path}/contract_registry/date=*/*.parquet"))
+    files_list = sorted(pyglob(f"{base_data_path}/smart_contract_registry/date=*/*.parquet"))
     if not files_list:
         return {}
 
@@ -277,11 +277,11 @@ def _read_max_versions(base_data_path: str) -> dict:
     return versions
 
 
-@register("contract_registry")
+@register("smart_contract_registry")
 class ContractRegistryExporter(ExternalExporter):
     """Exports contract registry data from GitHub repos (incremental)."""
 
-    name = "contract_registry"
+    name = "smart_contract_registry"
 
     def __init__(self, config: AppConfig, db: TrackingDB, uploader: S3Uploader):
         super().__init__(config, db, uploader)

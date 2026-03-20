@@ -316,10 +316,10 @@ class TestParsers:
 # ---------------------------------------------------------------------------
 
 def _write_contract_registry_parquet(base_path, date, script_hashes, versions=None):
-    """Write a fake contract_registry export parquet."""
+    """Write a fake smart_contract_registry export parquet."""
     if versions is None:
         versions = [1 for _ in script_hashes]
-    export_dir = Path(base_path) / "contract_registry" / f"date={date}"
+    export_dir = Path(base_path) / "smart_contract_registry" / f"date={date}"
     export_dir.mkdir(parents=True, exist_ok=True)
     table = pa.table({
         "script_hash": script_hashes,
@@ -332,7 +332,7 @@ def _write_contract_registry_parquet(base_path, date, script_hashes, versions=No
         "fetched_at": [f"{date}T00:00:00+00:00" for _ in script_hashes],
         "version": versions,
     })
-    pq.write_table(table, str(export_dir / f"contract_registry-{date}.parquet"))
+    pq.write_table(table, str(export_dir / f"smart_contract_registry-{date}.parquet"))
 
 
 class TestVersionColumn:

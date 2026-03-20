@@ -64,7 +64,7 @@ def _expand_range(range_str: str) -> list:
 @click.option("--dry-run", is_flag=True, help="Validate only, skip uploads")
 @click.option("--skip-validation", is_flag=True, help="Skip PG validation")
 @click.option("--rebuild-tracking", is_flag=True, help="Rebuild SQLite tracking from S3")
-@click.option("--external", "external_name", type=click.Choice(["asset_data", "contract_registry", "off_chain_pool_data"]),
+@click.option("--external", "external_name", type=click.Choice(["asset_data", "smart_contract_registry", "off_chain_pool_data"]),
               help="Run a single external exporter")
 @click.option("--external-all", is_flag=True, help="Run all external exporters")
 @click.option("--hybrid", "hybrid_name", type=str, default=None,
