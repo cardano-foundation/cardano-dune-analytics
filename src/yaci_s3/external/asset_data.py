@@ -4,7 +4,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import pyarrow as pa
 import requests
@@ -19,17 +19,28 @@ logger = logging.getLogger("yaci_s3.external.asset_data")
 
 MINSWAP_API_URL = "https://api-mainnet-prod.minswap.org/v1/assets/metrics"
 HEX56_RE = re.compile(r"^[0-9a-fA-F]{56}$")
-INT64_MAX = (2**63) - 1
-INT64_MIN = -(2**63)
+INT32_MAX = (2**31) - 1
+INT32_MIN = -(2**31)
 
 
 def _safe_int(value) -> int:
-    """Clamp a value to int64 range, defaulting to 0 for non-numeric."""
+    """Clamp a value to int32 range, defaulting to 0 for non-numeric."""
     try:
         v = int(value)
-        return max(INT64_MIN, min(INT64_MAX, v))
+        return max(INT32_MIN, min(INT32_MAX, v))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp string to a datetime, or None."""
+    if not value:
+        return None
+    try:
+        s = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
 
 
 def _safe_float(value) -> float:
@@ -145,8 +156,8 @@ class AssetDataExporter(ExternalExporter):
                 "url": metadata.get("url", ""),
                 "ticker": metadata.get("ticker", ""),
                 "decimals": _safe_int(metadata.get("decimals", 0)),
-                "created_at": metric.get("created_at", ""),
-                "categories": ",".join(metric.get("categories") or []),
+                "created_at": _parse_timestamp(metric.get("created_at")),
+                "categories": metric.get("categories") or [],
                 "price": _safe_float(metric.get("price", 0.0)),
                 "fetched_at": now,
             })
@@ -157,9 +168,9 @@ class AssetDataExporter(ExternalExporter):
             ("name", pa.string()),
             ("url", pa.string()),
             ("ticker", pa.string()),
-            ("decimals", pa.int64()),
-            ("created_at", pa.string()),
-            ("categories", pa.string()),
+            ("decimals", pa.int32()),
+            ("created_at", pa.timestamp('us', tz='UTC')),
+            ("categories", pa.list_(pa.string())),
             ("price", pa.float64()),
             ("fetched_at", pa.timestamp('us', tz='UTC')),
         ])
