@@ -364,7 +364,7 @@ class ContractRegistryExporter(ExternalExporter):
         logger.info("Exporting %d script hashes (new + updated)", len(export_records))
 
         # Step 4: Build the Arrow table with version numbers
-        max_versions = _read_max_versions(self.config.base_data_path)
+        max_versions = _read_max_versions(self.config.export_data_path)
         for r in export_records:
             r["version"] = max_versions.get(r["script_hash"], 0) + 1
 

@@ -32,7 +32,7 @@ class DRepDistEnrichedExporter(HybridExporter):
         if self._profile_cache is not None:
             return self._profile_cache
 
-        profile_path = Path(self.config.base_data_path) / "drep_profile" / "drep_profile.parquet"
+        profile_path = Path(self.config.export_data_path) / "drep_profile" / "drep_profile.parquet"
         if not profile_path.exists():
             logger.warning("drep_profile.parquet not found at %s — enrichment will have empty names", profile_path)
             self._profile_cache = {}

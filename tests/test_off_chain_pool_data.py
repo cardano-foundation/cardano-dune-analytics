@@ -24,7 +24,7 @@ def _make_config(base_path):
     return AppConfig(
         pg_host="", pg_port=5432, pg_db="", pg_user="", pg_password="",
         pg_schema="public", s3_bucket="test", base_data_path=base_path,
-        sqlite_path=":memory:", blockfrost_project_id="test_project_id",
+        export_data_path=base_path, sqlite_path=":memory:", blockfrost_project_id="test_project_id",
         anchor_max_workers=2,
     )
 

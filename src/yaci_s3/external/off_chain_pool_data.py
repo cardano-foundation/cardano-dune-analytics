@@ -233,7 +233,7 @@ class OffChainPoolDataExporter(ExternalExporter):
         if self._rebuild:
             max_versions = {}
         else:
-            max_versions = _read_max_versions(self.config.base_data_path)
+            max_versions = _read_max_versions(self.config.export_data_path)
 
         rows = []
         success_count = 0
@@ -269,13 +269,14 @@ class OffChainPoolDataExporter(ExternalExporter):
     def _find_incremental_pools(self) -> list:
         """Find pools that need resolution: new pools + updated pools."""
         base = self.config.base_data_path
+        export_base = self.config.export_data_path
 
         # Get all pool hashes and previously exported ones
         all_hashes = set(_read_all_pool_hashes(base))
         if not all_hashes:
             return []
 
-        already_exported = _read_already_exported(base)
+        already_exported = _read_already_exported(export_base)
 
         # New pools: not in any previous export
         new_pools = all_hashes - already_exported

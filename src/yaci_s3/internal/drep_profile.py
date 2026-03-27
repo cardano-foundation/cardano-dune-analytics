@@ -35,7 +35,7 @@ PROFILE_SCHEMA = pa.schema([
 
 
 def _profile_dir(config: AppConfig) -> Path:
-    return Path(config.base_data_path) / "drep_profile"
+    return Path(config.export_data_path) / "drep_profile"
 
 
 def _profile_path(config: AppConfig) -> Path:

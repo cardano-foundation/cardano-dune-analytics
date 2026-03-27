@@ -150,7 +150,7 @@ class ExternalExporter(ABC):
     def _write_parquet(self, table: pa.Table, date_str: str, suffix: Optional[int] = None) -> str:
         """Write a PyArrow Table to a local parquet file."""
         dir_path = os.path.join(
-            self.config.base_data_path, self.name, f"date={date_str}",
+            self.config.export_data_path, self.name, f"date={date_str}",
         )
         os.makedirs(dir_path, exist_ok=True)
         if suffix is not None:

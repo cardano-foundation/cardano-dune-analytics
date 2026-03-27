@@ -102,7 +102,7 @@ class HybridExporter(ABC):
                     summary["enriched"] += 1
 
                     # Write locally (atomic via temp file)
-                    out_dir = Path(self.config.base_data_path) / self.name / f"epoch={partition.partition_value}"
+                    out_dir = Path(self.config.export_data_path) / self.name / f"epoch={partition.partition_value}"
                     out_dir.mkdir(parents=True, exist_ok=True)
                     out_file = out_dir / f"{self.name}-epoch-{partition.partition_value}.parquet"
                     fd, tmp_path = tempfile.mkstemp(suffix=".parquet", dir=str(out_dir))

@@ -22,6 +22,7 @@ class AppConfig:
     pg_schema: str
     s3_bucket: str
     base_data_path: str
+    export_data_path: str
     sqlite_path: str
     aws_profile: str = ""
     exporters: Dict[str, ExporterDef] = field(default_factory=dict)
@@ -87,6 +88,7 @@ def load_config(env_path: str = ".env", exporters_path: str = "exporters.json",
         pg_schema=os.getenv("PG_SCHEMA", "public"),
         s3_bucket=os.getenv("S3_BUCKET"),
         base_data_path=os.getenv("BASE_DATA_PATH"),
+        export_data_path=os.getenv("EXPORT_DATA_PATH", os.getenv("BASE_DATA_PATH")),
         sqlite_path=os.getenv("SQLITE_PATH", "./uploads.db"),
         aws_profile=os.getenv("AWS_PROFILE", ""),
         exporters=exporters,
