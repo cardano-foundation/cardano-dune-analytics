@@ -193,8 +193,24 @@ class OffChainPoolDataExporter(ExternalExporter):
         super().__init__(config, db, uploader)
         self._rebuild = False
 
+    def _compute_pool_reg_max_date(self) -> Optional[str]:
+        """Get the max date partition from pool_registration data."""
+        pool_dir = Path(self.config.base_data_path) / "pool_registration"
+        if not pool_dir.is_dir():
+            return None
+        dates = []
+        for d in pool_dir.iterdir():
+            m = DATE_RE.search(d.name)
+            if m:
+                dates.append(m.group(1))
+        return max(dates) if dates else None
+
+    def get_source_watermark(self) -> Optional[str]:
+        return self._source_watermark
+
     def fetch_data(self) -> Optional[pa.Table]:
         """Read on-chain pool hashes and resolve metadata via Blockfrost."""
+        self._source_watermark = self._compute_pool_reg_max_date()
         if self._rebuild:
             pools_to_resolve = _read_all_pool_hashes(self.config.base_data_path)
             if not pools_to_resolve:
@@ -264,9 +280,9 @@ class OffChainPoolDataExporter(ExternalExporter):
         # New pools: not in any previous export
         new_pools = all_hashes - already_exported
 
-        # Updated pools: appear in pool partitions after last export date
+        # Updated pools: appear in pool partitions after the source watermark
         updated_pools = set()
-        last_export_date = _get_last_export_date(base)
+        last_export_date = self.db.get_last_source_watermark(self.name)
         if last_export_date:
             changed_pools = _read_pool_hashes_since(base, last_export_date)
             # Only count as updated if they were already exported (otherwise they're new)

@@ -42,6 +42,14 @@ class ExternalExporter(ABC):
     def validate(self, table: pa.Table) -> bool:
         """Validate the fetched data. Returns True if valid."""
 
+    def get_source_watermark(self) -> Optional[str]:
+        """Return the source data watermark for this run, or None.
+
+        Subclasses override to record the max date/epoch of the source
+        data consumed, so incremental runs know where to resume from.
+        """
+        return None
+
     def run(self, dry_run: bool = False) -> dict:
         """Execute the full fetch -> write -> upload cycle."""
         run_id = self.db.start_external_run(self.name)
@@ -89,7 +97,10 @@ class ExternalExporter(ABC):
 
             if dry_run:
                 logger.info("[%s] Dry run - skipping S3 upload", self.name)
-                self.db.complete_external_run(run_id, len(table), len(table), "completed")
+                self.db.complete_external_run(
+                    run_id, len(table), len(table), "completed",
+                    source_data_watermark=self.get_source_watermark(),
+                )
                 return summary
 
             # Upload
@@ -120,7 +131,10 @@ class ExternalExporter(ABC):
             ))
 
             logger.info("[%s] Upload complete: %s", self.name, uploaded_key)
-            self.db.complete_external_run(run_id, len(table), len(table), "completed")
+            self.db.complete_external_run(
+                run_id, len(table), len(table), "completed",
+                source_data_watermark=self.get_source_watermark(),
+            )
 
         except Exception as e:
             logger.error("[%s] Run failed: %s", self.name, e)

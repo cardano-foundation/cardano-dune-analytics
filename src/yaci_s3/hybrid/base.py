@@ -55,6 +55,7 @@ class HybridExporter(ABC):
 
     def run(self, dry_run: bool = False, partition_filter: Optional[set] = None) -> dict:
         """Scan source partitions, enrich, write, upload."""
+        run_id = self.db.start_external_run(self.name)
         summary = {
             "exporter": self.name,
             "scanned": 0,
@@ -85,7 +86,11 @@ class HybridExporter(ABC):
             )
 
             if not new_partitions:
+                self.db.complete_external_run(run_id, 0, 0, "completed")
                 return summary
+
+            # Compute max partition value as source watermark
+            max_partition = max(p.partition_value for p in new_partitions)
 
             for partition in new_partitions:
                 try:
@@ -156,9 +161,18 @@ class HybridExporter(ABC):
                                  self.name, partition.partition_value, e)
                     summary["errors"] += 1
 
+            self.db.complete_external_run(
+                run_id, summary["enriched"], summary["uploaded"],
+                "completed", source_data_watermark=max_partition,
+            )
+
         except Exception as e:
             logger.error("[%s] Run failed: %s", self.name, e)
             summary["status"] = "failed"
             summary["error"] = str(e)
+            self.db.complete_external_run(
+                run_id, summary.get("enriched", 0), summary.get("uploaded", 0),
+                "failed", str(e),
+            )
 
         return summary

@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS external_exporter_runs (
     records_fetched INTEGER,
     records_exported INTEGER,
     status TEXT NOT NULL DEFAULT 'running',
-    error_details TEXT
+    error_details TEXT,
+    source_data_watermark TEXT
 );
 
 CREATE TABLE IF NOT EXISTS contract_registry_state (
@@ -87,6 +88,12 @@ class TrackingDB:
     def _init_schema(self):
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        # Migrate existing databases: add source_data_watermark column
+        try:
+            self.conn.execute("ALTER TABLE external_exporter_runs ADD COLUMN source_data_watermark TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     def get_uploaded_partitions(self, exporter: str) -> Set[str]:
         """Get set of partition values already uploaded for an exporter."""
@@ -264,17 +271,30 @@ class TrackingDB:
 
     def complete_external_run(self, run_id: int, records_fetched: int,
                               records_exported: int, status: str = "completed",
-                              error_details: str = None):
+                              error_details: str = None,
+                              source_data_watermark: str = None):
         """Update an external exporter run as completed or failed."""
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute(
             """UPDATE external_exporter_runs
                SET run_completed_at = ?, records_fetched = ?, records_exported = ?,
-                   status = ?, error_details = ?
+                   status = ?, error_details = ?, source_data_watermark = ?
                WHERE id = ?""",
-            (now, records_fetched, records_exported, status, error_details, run_id),
+            (now, records_fetched, records_exported, status, error_details,
+             source_data_watermark, run_id),
         )
         self.conn.commit()
+
+    def get_last_source_watermark(self, exporter: str) -> Optional[str]:
+        """Get the source_data_watermark from the last successful run."""
+        cursor = self.conn.execute(
+            """SELECT source_data_watermark FROM external_exporter_runs
+               WHERE exporter = ? AND status = 'completed' AND source_data_watermark IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (exporter,),
+        )
+        row = cursor.fetchone()
+        return row["source_data_watermark"] if row else None
 
     def get_contract_registry_state(self, source: str) -> Optional[str]:
         """Get the last commit SHA for a contract registry source."""

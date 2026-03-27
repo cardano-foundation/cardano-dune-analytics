@@ -193,6 +193,7 @@ def test_fetch_data_incremental_new_pool(mock_resolve):
         _write_export_parquet(base, "2024-01-10", ["hash1abc"])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = "2024-01-10"
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -224,6 +225,7 @@ def test_fetch_data_incremental_updated_pool(mock_resolve):
         _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = "2024-01-10"
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -244,6 +246,7 @@ def test_fetch_data_incremental_nothing_new(mock_resolve):
         # No new pool partitions after export date
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = "2024-01-10"
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -265,6 +268,7 @@ def test_fetch_data_all_fail(mock_resolve):
         _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = None
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -298,6 +302,7 @@ def test_validate(mock_resolve):
         _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = None
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -384,6 +389,7 @@ def test_version_incremental_increments(mock_resolve):
         _write_pool_parquet(base, "2024-01-15", [{"pool_id": "hash1abc"}])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = "2024-01-10"
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
@@ -411,6 +417,7 @@ def test_version_new_pool_gets_one(mock_resolve):
         _write_export_parquet(base, "2024-01-10", ["hash1abc"], [1])
 
         db = MagicMock()
+        db.get_last_source_watermark.return_value = "2024-01-10"
         uploader = MagicMock()
         exporter = OffChainPoolDataExporter(config, db, uploader)
         table = exporter.fetch_data()
