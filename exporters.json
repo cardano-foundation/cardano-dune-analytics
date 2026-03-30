@@ -11,6 +11,7 @@
     {"name": "gov_action_proposal", "pg_table": "gov_action_proposal", "slot_column": "slot", "partition_type": "daily", "group": "dune"},
     {"name": "reward", "pg_table": "reward", "slot_column": "earned_epoch", "partition_type": "epoch", "group": "dune"},
     {"name": "epoch_stake", "pg_table": "epoch_stake", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"},
-    {"name": "gov_action_proposal_status", "pg_table": "gov_action_proposal_status", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"}
+    {"name": "gov_action_proposal_status", "pg_table": "gov_action_proposal_status", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"},
+    {"name": "adapot", "pg_table": "adapot", "slot_column": "epoch", "partition_type": "epoch", "group": "dune"}
   ]
 }
