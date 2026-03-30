@@ -79,6 +79,7 @@ def _expand_range(range_str: str) -> list:
               help="Start date for internal job date range (YYYY-MM-DD)")
 @click.option("--end-date", type=str, default=None,
               help="End date for internal job date range (YYYY-MM-DD)")
+@click.option("--validate-adapot", is_flag=True, help="Validate adapot data against Koios API")
 @click.option("--env-file", type=str, default=".env", help="Path to .env file")
 @click.option("--exporters-file", type=str, default="exporters.json", help="Path to exporters.json")
 @click.option("--verbose", is_flag=True, help="Enable debug logging")
@@ -102,6 +103,7 @@ def main(
     single_date,
     start_date,
     end_date,
+    validate_adapot,
     env_file,
     exporters_file,
     verbose,
@@ -109,14 +111,25 @@ def main(
     """S3 upload tool for yaci-store parquet exports."""
     logger = setup_logging(verbose)
 
-    # External/hybrid/internal exporters don't need PG
-    require_pg = not (external_name or external_all or hybrid_name or hybrid_all or internal_name)
+    # External/hybrid/internal/validate exporters don't need PG
+    require_pg = not (external_name or external_all or hybrid_name or hybrid_all or internal_name or validate_adapot)
 
     try:
         config = load_config(env_file, exporters_file, require_pg=require_pg)
     except (ValueError, FileNotFoundError) as e:
         logger.error("Configuration error: %s", e)
         sys.exit(1)
+
+    # --- Validate adapot path ---
+    if validate_adapot:
+        from .validators.adapot_koios import validate_all
+        mismatches = validate_all(config.base_data_path)
+        if mismatches:
+            logger.error("Adapot validation: %d epochs with mismatches", len(mismatches))
+            sys.exit(1)
+        else:
+            logger.info("Adapot validation: all epochs passed")
+        return
 
     # --- Internal job path ---
     if internal_name:
