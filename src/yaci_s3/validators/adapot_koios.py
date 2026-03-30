@@ -2,7 +2,6 @@
 
 import logging
 import time
-from decimal import Decimal
 from glob import glob as pyglob
 from pathlib import Path
 from typing import List, Optional
@@ -15,7 +14,6 @@ logger = logging.getLogger("yaci_s3.validators.adapot_koios")
 
 KOIOS_TOTALS_URL = "https://api.koios.rest/api/v1/totals"
 KOIOS_FIELDS = ["treasury", "reserves", "fees", "deposits_stake"]
-POOL_REWARD_RATIO = Decimal("0.8")  # 1 - treasury_growth_rate (0.2)
 REQUEST_DELAY = 0.1  # 10 req/s Koios free tier
 
 
@@ -76,7 +74,8 @@ def validate_epoch(parquet_path: str, epoch: int) -> dict:
     rewards_pot = table.column("rewards_pot")[0].as_py()
     pool_rewards_pot = table.column("pool_rewards_pot")[0].as_py()
     if rewards_pot and rewards_pot > 0:
-        expected_pool = int(Decimal(rewards_pot) * POOL_REWARD_RATIO)
+        # Cardano ledger uses floor division: pool_rewards = rewards_pot * 4 // 5
+        expected_pool = (rewards_pot * 4) // 5
         ratio_match = pool_rewards_pot == expected_pool
         result["ratio_check"] = {
             "rewards_pot": rewards_pot,
