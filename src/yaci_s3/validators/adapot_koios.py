@@ -43,7 +43,7 @@ def validate_epoch(parquet_path: str, epoch: int) -> dict:
         - "all_pass": bool
         - "koios_available": bool
     """
-    table = pq.read_table(parquet_path)
+    table = pq.ParquetFile(parquet_path).read()
     result = {
         "epoch": epoch,
         "koios_fields": {},
@@ -95,7 +95,7 @@ def correct_epoch(parquet_path: str, koios_data: dict) -> str:
 
     Only corrects the 4 Koios-validatable fields. Returns the path written.
     """
-    table = pq.read_table(parquet_path)
+    table = pq.ParquetFile(parquet_path).read()
     schema = table.schema
 
     for field in KOIOS_FIELDS:
