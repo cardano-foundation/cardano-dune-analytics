@@ -1,0 +1,15 @@
+# S3 Uploader cron schedule
+# Install: crontab scripts/crontab
+# Edit PROJ_DIR below to match your installation path.
+
+PROJ_DIR=/home/kartik/cardano-dune-analytics
+
+# Daily pipeline: dune (13 exporters) → drep_profile → off_chain_pool_data → drep_dist_enriched
+# Yaci node writes daily parquet at 01:00 UTC; pipeline starts at 02:00 UTC (1h buffer)
+0 2 * * * $PROJ_DIR/scripts/daily-pipeline.sh >> $PROJ_DIR/logs/cron-daily.log 2>&1
+
+# Smart contract registry: daily at 02:30 UTC (independent, checks GitHub for updates)
+30 2 * * * $PROJ_DIR/scripts/run-exporter.sh --external smart_contract_registry >> $PROJ_DIR/logs/cron-registry.log 2>&1
+
+# Asset data: every 2 hours (independent, fetches from Minswap API)
+0 */2 * * * $PROJ_DIR/scripts/run-exporter.sh --external asset_data >> $PROJ_DIR/logs/cron-asset.log 2>&1
