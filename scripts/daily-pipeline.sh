@@ -3,6 +3,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
+export PATH="$HOME/.local/bin:$PATH"
 
 echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') | Starting daily pipeline ==="
 
