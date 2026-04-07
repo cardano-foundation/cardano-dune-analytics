@@ -158,7 +158,7 @@ class AssetDataExporter(ExternalExporter):
                 "token_name": asset.get("token_name", ""),
                 "name": metadata.get("name", ""),
                 "url": metadata.get("url", ""),
-                "ticker": metadata.get("ticker", ""),
+                "ticker": metadata.get("ticker", "") or metadata.get("name", ""),
                 "decimals": _safe_int(metadata.get("decimals", 0)),
                 "created_at": _parse_timestamp(metric.get("created_at")),
                 "categories": metric.get("categories") or [],
