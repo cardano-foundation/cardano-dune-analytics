@@ -149,6 +149,10 @@ class AssetDataExporter(ExternalExporter):
         for metric in raw_assets:
             asset = metric.get("asset", {})
             metadata = asset.get("metadata") or {}
+            categories = metric.get("categories") or []
+            # Skip meme tokens misclassified as stablecoins
+            if "Stablecoin" in categories and "Meme" in categories:
+                continue
             rows.append({
                 "policy_id": asset.get("currency_symbol", ""),
                 "token_name": asset.get("token_name", ""),
