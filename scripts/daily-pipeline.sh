@@ -90,6 +90,11 @@ ENRICHED_OUTPUT=$(uv run python -m yaci_s3.cli --hybrid drep_dist_enriched 2>&1)
 echo "$ENRICHED_OUTPUT"
 ENRICHED_COUNT=$(echo "$ENRICHED_OUTPUT" | grep -oP 'uploaded=\K[0-9]+' || echo "0")
 
+CURRENT_STEP="5/5 Update manifest"
+# --- Step 5: Update CloudFront manifest ---
+echo "--- Step 5/5: Update CloudFront manifest ---"
+"$SCRIPT_DIR/update-manifest.sh"
+
 # --- Summary & notification ---
 DURATION=$(duration)
 echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') | Daily pipeline complete ($DURATION) ==="
