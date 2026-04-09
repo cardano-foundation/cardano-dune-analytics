@@ -9,30 +9,30 @@ if [ -f .env ]; then
     set -a; source .env; set +a
 fi
 
-BUCKET="${S3_BUCKET:-cf-yaci-store-dataset}"
-BASE_URL="https://d1gyygzinbyryv.cloudfront.net"
-MANIFEST="/tmp/cloudfront_manifest.json"
-
 echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') | Updating CloudFront manifest ==="
 
-# List all parquet files from S3
-aws ${AWS_PROFILE:+--profile "$AWS_PROFILE"} s3 ls "s3://${BUCKET}/" --recursive \
-    | grep '\.parquet$' \
-    | awk '{print $4}' \
-    | sort > /tmp/s3_parquet_files.txt
-
-FILE_COUNT=$(wc -l < /tmp/s3_parquet_files.txt)
-echo "Found $FILE_COUNT parquet files"
-
-# Generate manifest JSON
 uv run python -c "
-import json
+import json, boto3, os
+from datetime import datetime, timezone
 
-base_url = '${BASE_URL}'
+bucket = os.getenv('S3_BUCKET', 'cf-yaci-store-dataset')
+profile = os.getenv('AWS_PROFILE', '')
+base_url = 'https://d1gyygzinbyryv.cloudfront.net'
 
-with open('/tmp/s3_parquet_files.txt') as f:
-    files = [line.strip() for line in f if line.strip()]
+session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+s3 = session.client('s3')
 
+# List all parquet files
+files = []
+paginator = s3.get_paginator('list_objects_v2')
+for page in paginator.paginate(Bucket=bucket):
+    for obj in page.get('Contents', []):
+        if obj['Key'].endswith('.parquet'):
+            files.append(obj['Key'])
+
+files.sort()
+
+# Group by exporter
 exporters = {}
 for path in files:
     exporter = path.split('/')[0]
@@ -44,24 +44,22 @@ manifest = {
     'version': '1.0',
     'base_url': base_url,
     'total_files': len(files),
-    'generated_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'generated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
     'exporters': {
         name: {
-            'file_count': len(files_list),
-            'files': sorted(files_list)
+            'file_count': len(file_list),
+            'files': sorted(file_list)
         }
-        for name, files_list in sorted(exporters.items())
+        for name, file_list in sorted(exporters.items())
     }
 }
 
-with open('${MANIFEST}', 'w') as f:
-    json.dump(manifest, f, indent=2)
+manifest_json = json.dumps(manifest, indent=2)
+
+# Upload to S3
+s3.put_object(Bucket=bucket, Key='cloudfront_manifest.json',
+              Body=manifest_json, ContentType='application/json')
 
 print(f'Manifest: {len(files)} files, {len(exporters)} exporters')
+print('Uploaded cloudfront_manifest.json to S3')
 "
-
-# Upload manifest to S3
-aws ${AWS_PROFILE:+--profile "$AWS_PROFILE"} s3 cp "$MANIFEST" "s3://${BUCKET}/cloudfront_manifest.json" \
-    --content-type application/json --quiet
-
-echo "Uploaded cloudfront_manifest.json to S3"
