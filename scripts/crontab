@@ -1,18 +1,29 @@
 # S3 Uploader cron schedule
 # Install: crontab scripts/crontab
-# Edit PROJ_DIR below to match your installation path.
+# Edit PROJ_DIR and the times below to match your installation.
+#
+# IMPORTANT: cron interprets these times in the SERVER'S LOCAL TIMEZONE.
+# CRON_TZ is silently ignored on some Debian builds, so we encode the
+# UTC-equivalent in local time directly. Update the values below if
+# deploying to a server in a different timezone (or if DST shifts).
+#
+# Server: dune (zur2-s-d-107) — Europe/Zurich (CEST = UTC+2 in summer,
+# CET = UTC+1 in winter). The yaci-store source node writes daily
+# parquet at 02:00 UTC. We start the pipeline at 04:00 CEST (= 02:00
+# UTC) to land right after that. During CET (winter), the same entry
+# fires at 03:00 UTC — still after the source data is written, just
+# 1h later than ideal; the retry polling absorbs the difference.
 
-# Interpret all schedules below in UTC (server may be in a non-UTC tz).
-CRON_TZ=UTC
 PROJ_DIR=/home/kartik/cardano-dune-analytics
 
-# Daily pipeline with retry polling: starts at 02:00 UTC, retries every 10min until new files found
-# Runs: dune (13 exporters) → drep_profile → off_chain_pool_data → drep_dist_enriched
-# Sends Telegram notification on completion or failure
-0 2 * * * $PROJ_DIR/scripts/daily-pipeline.sh >> $PROJ_DIR/logs/cron-daily.log 2>&1
+# Daily pipeline: 04:00 CEST = 02:00 UTC (yaci writes at 02:00 UTC).
+# Retries every 10 min (max 12 attempts) until step 1 finds new files.
+0 4 * * * $PROJ_DIR/scripts/daily-pipeline.sh >> $PROJ_DIR/logs/cron-daily.log 2>&1
 
-# Smart contract registry: daily at 06:00 UTC (independent, checks GitHub for updates)
-0 6 * * * $PROJ_DIR/scripts/run-exporter.sh --external smart_contract_registry >> $PROJ_DIR/logs/cron-registry.log 2>&1
+# Smart contract registry: 08:00 CEST = 06:00 UTC (independent, GitHub).
+0 8 * * * $PROJ_DIR/scripts/run-exporter.sh --external smart_contract_registry >> $PROJ_DIR/logs/cron-registry.log 2>&1
 
-# Asset data: every 2 hours (independent, fetches from Minswap API)
+# Asset data: every 2 hours (independent, Minswap API).
+# `0 */2` fires at minute 0 of every even hour in local time. With
+# CEST that maps to 22, 00, 02, 04, ..., 20 UTC — every 2h either way.
 0 */2 * * * $PROJ_DIR/scripts/run-exporter.sh --external asset_data >> $PROJ_DIR/logs/cron-asset.log 2>&1
