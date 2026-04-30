@@ -5,11 +5,13 @@ S3 upload tool for yaci-store Cardano parquet exports. Validates parquet files a
 ## Setup
 
 ```bash
-# Install uv if needed: https://docs.astral.sh/uv/getting-started/installation/
+# Install uv: https://docs.astral.sh/uv/getting-started/installation/
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
-cp .env.example .env
-# Edit .env with your actual values
+cp .env.example .env  # then edit with real values
 ```
+
+For deploying to a new production server (with cron + Telegram), see [Deployment](#deployment).
 
 ## Configuration
 
@@ -17,22 +19,27 @@ cp .env.example .env
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PG_HOST` | PostgreSQL host | (required) |
+| `PG_HOST` | PostgreSQL host | (required, unless `SKIP_PG_VALIDATION=true`) |
 | `PG_PORT` | PostgreSQL port | `5432` |
-| `PG_DB` | PostgreSQL database | (required) |
-| `PG_USER` | PostgreSQL user | (required) |
-| `PG_PASSWORD` | PostgreSQL password | (required) |
+| `PG_DB` | PostgreSQL database | (required, unless `SKIP_PG_VALIDATION=true`) |
+| `PG_USER` | PostgreSQL user | (required, unless `SKIP_PG_VALIDATION=true`) |
+| `PG_PASSWORD` | PostgreSQL password | (required, unless `SKIP_PG_VALIDATION=true`) |
 | `PG_SCHEMA` | PostgreSQL schema | `public` |
 | `S3_BUCKET` | S3 bucket name | (required) |
 | `AWS_PROFILE` | AWS CLI profile name for credentials | (optional) |
-| `BASE_DATA_PATH` | Local path to parquet exports | (required) |
+| `BASE_DATA_PATH` | Local path to **read** source parquet exports (yaci-store output) | (required) |
+| `EXPORT_DATA_PATH` | Local path to **write** external/hybrid exporter output. Falls back to `BASE_DATA_PATH` if unset. Set when source dir is read-only. | `BASE_DATA_PATH` |
 | `SQLITE_PATH` | Path to tracking database | `./uploads.db` |
 | `BLOCKFROST_PROJECT_ID` | Blockfrost API project ID for DRep metadata resolution | (required for drep_profile) |
 | `ANCHOR_MAX_WORKERS` | Max parallel threads for DRep metadata resolution | `5` |
+| `SKIP_PG_VALIDATION` | When `true`, the daily pipeline script passes `--skip-validation` to dune exporters. Use on servers without PG access. | `false` |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token for pipeline notifications | (optional) |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID for pipeline notifications | (optional) |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook URL for pipeline notifications | (optional) |
 
 ### `exporters.json`
 
-Defines the 12 dune-group exporters (9 daily, 3 epoch). Each entry specifies the exporter name, PG table, slot/epoch column, and partition type.
+Defines the 13 dune-group exporters (9 daily, 4 epoch — `block`, `transaction`, `transaction_metadata`, `transaction_scripts`, `tx_input`, `assets`, `address_utxo`, `voting_procedure`, `gov_action_proposal`, `reward`, `epoch_stake`, `gov_action_proposal_status`, `adapot`). Each entry specifies the exporter name, PG table, slot/epoch column, and partition type.
 
 ### AWS Credentials
 
@@ -162,9 +169,9 @@ External exporters fetch data from HTTP APIs (not PostgreSQL), produce parquet f
 
 | Exporter | Source | Schedule | Description |
 |----------|--------|----------|-------------|
-| `asset_data` | Minswap API | Every 2 hours | Full snapshot of all verified Cardano tokens with price data |
-| `contract_registry` | GitHub repos | Daily | Incremental export of new smart contract script hashes |
-| `off_chain_pool_data` | Blockfrost API | Daily | Pool off-chain metadata (ticker, name, homepage). Supports `--rebuild` for full resolution |
+| `asset_data` | Minswap API | Every 2 hours | Full snapshot of all verified Cardano tokens with price data. Fetched_at column is timestamp; meme tokens with `Stablecoin` category are filtered out; ticker falls back to `name` for bridged tokens. |
+| `smart_contract_registry` | GitHub repos | Daily | Incremental export of new smart contract script hashes |
+| `off_chain_pool_data` | Blockfrost API | Daily | Pool off-chain metadata (ticker, name, homepage). Supports `--rebuild` for full resolution. |
 
 ```bash
 # Run a single external exporter
@@ -177,7 +184,7 @@ uv run yaci-s3 --external-all
 uv run yaci-s3 --external asset_data --dry-run
 
 # Verbose logging
-uv run yaci-s3 --external contract_registry --verbose
+uv run yaci-s3 --external smart_contract_registry --verbose
 ```
 
 External exporters **do not** require PostgreSQL credentials — only `S3_BUCKET` and `BASE_DATA_PATH` are needed.
@@ -239,7 +246,7 @@ Fetches pool off-chain metadata (ticker, name, description, homepage) from the B
 | `homepage` | string | Pool homepage URL |
 | `metadata_url` | string | URL of the off-chain metadata JSON |
 | `metadata_hash` | string | Hash of the metadata content |
-| `fetched_at` | string | ISO timestamp of when metadata was fetched |
+| `fetched_at` | timestamp(us, tz=UTC) | When metadata was fetched |
 | `version` | int32 | Row version number (1 = first appearance, increments on updates) |
 
 **Two modes:**
@@ -264,7 +271,7 @@ uv run yaci-s3 --external off_chain_pool_data --dry-run
 
 **S3 path:** `off_chain_pool_data/{YYYY-MM-DD}/off_chain_pool_data-{YYYY-MM-DD}.{N}.parquet`
 
-### Contract Registry (External Exporter)
+### Smart Contract Registry (External Exporter)
 
 Fetches smart contract script hash data from GitHub repositories and exports as date-partitioned parquet files. Uses the GitHub Compare API to only fetch changed files on incremental runs.
 
@@ -279,7 +286,7 @@ Fetches smart contract script hash data from GitHub repositories and exports as 
 | `sub_category` | string | Project subcategory |
 | `purpose` | string | Script purpose (e.g. spend) |
 | `language` | string | Contract language (e.g. Plutus, PlutusV2) |
-| `fetched_at` | string | ISO timestamp of when data was fetched |
+| `fetched_at` | timestamp(us, tz=UTC) | When data was fetched |
 | `version` | int32 | Row version number (1 = first appearance, increments on updates) |
 
 **Sources** (checked in priority order — highest priority wins when same script_hash appears in multiple):
@@ -291,13 +298,13 @@ Fetches smart contract script hash data from GitHub repositories and exports as 
 
 ```bash
 # Daily incremental (only changed files since last commit)
-uv run yaci-s3 --external contract_registry
+uv run yaci-s3 --external smart_contract_registry
 
 # Dry run
-uv run yaci-s3 --external contract_registry --dry-run
+uv run yaci-s3 --external smart_contract_registry --dry-run
 ```
 
-**S3 path:** `contract_registry/{YYYY-MM-DD}/contract_registry-{YYYY-MM-DD}.parquet`
+**S3 path:** `smart_contract_registry/{YYYY-MM-DD}/smart_contract_registry-{YYYY-MM-DD}.parquet`
 
 ### Hybrid Exporters
 
@@ -340,7 +347,7 @@ Hybrid exporters **do not** require PostgreSQL credentials.
 Most external exporters produce one file per day:
 
 - **S3 key**: `{exporter}/{YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
-- **Local**: `{BASE_DATA_PATH}/{exporter}/date={YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet`
+- **Local**: `{EXPORT_DATA_PATH}/{exporter}/date={YYYY-MM-DD}/{exporter}-{YYYY-MM-DD}.parquet` (falls back to `BASE_DATA_PATH` if `EXPORT_DATA_PATH` is not set)
 
 `asset_data` runs every 2 hours and uses a `.N` suffix for multiple snapshots per day:
 
@@ -349,15 +356,11 @@ Most external exporters produce one file per day:
 
 #### Scheduling
 
-External exporters are intended to be invoked by an external scheduler (cron/systemd timer):
+For production scheduling, see the [Deployment](#deployment) section. Production uses:
 
-```bash
-# asset_data every 2 hours
-0 */2 * * * cd /path/to/s3-uploader && uv run yaci-s3 --external asset_data
-
-# contract_registry daily at 6am UTC
-0 6 * * * cd /path/to/s3-uploader && uv run yaci-s3 --external contract_registry
-```
+- `scripts/daily-pipeline.sh` for the full chain (dune exporters → drep_profile → off_chain_pool_data → drep_dist_enriched → CloudFront manifest), with retry polling
+- `scripts/run-exporter.sh` for one-off cron jobs (`asset_data` every 2h, `smart_contract_registry` daily)
+- `scripts/crontab` is the canonical schedule template — install with `crontab scripts/crontab` after editing `PROJ_DIR`
 
 ## CLI Reference
 
@@ -373,7 +376,7 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | `--dry-run` | Validate only, skip actual S3 uploads |
 | `--skip-validation` | Skip PostgreSQL validation checks |
 | `--rebuild-tracking` | Rebuild SQLite tracking DB from S3 bucket listing |
-| `--external NAME` | Run a single external exporter (`asset_data`, `contract_registry`, or `off_chain_pool_data`) |
+| `--external NAME` | Run a single external exporter (`asset_data`, `smart_contract_registry`, or `off_chain_pool_data`) |
 | `--external-all` | Run all external exporters |
 | `--hybrid NAME` | Run a single hybrid exporter (e.g. `drep_dist_enriched`) |
 | `--hybrid-all` | Run all hybrid exporters |
@@ -382,6 +385,7 @@ External exporters are intended to be invoked by an external scheduler (cron/sys
 | `--date YYYY-MM-DD` | Process a specific date (for internal jobs) |
 | `--start-date YYYY-MM-DD` | Start date for internal job date range |
 | `--end-date YYYY-MM-DD` | End date for internal job date range |
+| `--validate-adapot` | Validate adapot data against Koios `/totals` API (treasury, reserves, fees, deposits_stake, pool_rewards ratio) |
 | `--env-file PATH` | Path to `.env` file (default: `.env`) |
 | `--exporters-file PATH` | Path to exporters config (default: `exporters.json`) |
 | `--verbose` | Enable debug-level logging |
@@ -514,14 +518,15 @@ Tracks run history for external exporters.
 
 ```sql
 CREATE TABLE external_exporter_runs (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    exporter         TEXT NOT NULL,           -- e.g. "asset_data", "contract_registry"
-    run_started_at   TEXT NOT NULL,           -- ISO 8601 UTC timestamp
-    run_completed_at TEXT,                    -- ISO 8601 UTC timestamp
-    records_fetched  INTEGER,                -- rows fetched from API
-    records_exported INTEGER,                -- rows written to parquet
-    status           TEXT NOT NULL DEFAULT 'running',  -- running, completed, failed
-    error_details    TEXT                     -- error message if failed
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    exporter              TEXT NOT NULL,           -- e.g. "asset_data", "smart_contract_registry"
+    run_started_at        TEXT NOT NULL,           -- ISO 8601 UTC timestamp
+    run_completed_at      TEXT,                    -- ISO 8601 UTC timestamp
+    records_fetched       INTEGER,                 -- rows fetched from API
+    records_exported      INTEGER,                 -- rows written to parquet
+    status                TEXT NOT NULL DEFAULT 'running',  -- running, completed, failed
+    error_details         TEXT,                    -- error message if failed
+    source_data_watermark TEXT                     -- max source partition consumed (e.g. pool_registration date or drep_dist epoch); used to drive incremental runs
 );
 ```
 
@@ -616,6 +621,89 @@ Each pipeline step is timed and logged with the format:
 
 The file log always captures DEBUG level regardless of `--verbose`.
 
+## Deployment
+
+Production runs on `ssh dune` (Debian 13). Yaci-store data is sshfs-mounted from another node at `/opt/yaci-store/analytics/` (read-only). External / hybrid exporter output is written to `~/cardano-dune-analytics/exports/` via `EXPORT_DATA_PATH`. The dune host has no PostgreSQL access, so `SKIP_PG_VALIDATION=true` is set in `.env` (validation is skipped for the dune-group exporters; row counts and slot ranges are still recorded).
+
+### Bootstrapping a new server
+
+These steps assume Debian/Ubuntu with Python 3.12+ and `curl`/`wget`. If `git` isn't installed, use `wget` + tarball (see `scripts/update-code.sh`).
+
+1. **Install uv**:
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+2. **Get the code** (with git, or via the tarball helper if git is unavailable):
+    ```bash
+    git clone https://github.com/cardano-foundation/cardano-dune-analytics.git ~/cardano-dune-analytics
+    # or:
+    wget -O /tmp/repo.tar.gz https://github.com/cardano-foundation/cardano-dune-analytics/archive/refs/heads/master.tar.gz
+    mkdir -p ~/cardano-dune-analytics && tar -xzf /tmp/repo.tar.gz -C /tmp \
+      && cp -r /tmp/cardano-dune-analytics-master/. ~/cardano-dune-analytics/ \
+      && chmod +x ~/cardano-dune-analytics/scripts/*.sh
+    ```
+3. **Install AWS credentials** at `~/.aws/credentials` and `~/.aws/config` (referenced via `AWS_PROFILE` in `.env`). The pipeline uses **boto3 only** — the `aws` CLI is not required.
+4. **Create `.env`** with the variables above. On servers without PG access (e.g., dune), set `SKIP_PG_VALIDATION=true` and leave PG_* values dummy.
+5. **Install dependencies**:
+    ```bash
+    cd ~/cardano-dune-analytics && uv sync
+    ```
+6. **Seed `uploads.db` and `exports/`** (optional, but avoids rediscovery / re-upload of historical data) by copying from a previous host or running `--rebuild-tracking`:
+    ```bash
+    # From an existing host:
+    scp old-host:~/cardano-dune-analytics/uploads.db ~/cardano-dune-analytics/
+    scp -r old-host:~/cardano-dune-analytics/exports ~/cardano-dune-analytics/
+    # Or rebuild tracking from S3:
+    uv run yaci-s3 --rebuild-tracking
+    ```
+7. **Test the pipeline**:
+    ```bash
+    ~/cardano-dune-analytics/scripts/daily-pipeline.sh
+    ```
+8. **Install the crontab** (edit `PROJ_DIR` first):
+    ```bash
+    vi ~/cardano-dune-analytics/scripts/crontab   # set PROJ_DIR
+    crontab ~/cardano-dune-analytics/scripts/crontab
+    crontab -l   # verify
+    ```
+
+### Cron schedule
+
+Defined in `scripts/crontab`. Three jobs:
+
+| Time (UTC) | Job | Notes |
+|---|---|---|
+| 02:00 daily | `daily-pipeline.sh` | All 5 steps with retry polling. See below. |
+| 06:00 daily | `--external smart_contract_registry` | Independent; checks GitHub for updates. |
+| Every 2h | `--external asset_data` | Independent; fetches Minswap API. |
+
+### Daily pipeline (`daily-pipeline.sh`)
+
+Sequential, with **retry polling** for step 1 and a Telegram/Slack notification at the end. Yaci-store on the source node writes the previous day's parquet around 02:00 UTC; the pipeline starts at 02:00 UTC and retries every 10 minutes (max 2 hours) until step 1 finds new partitions.
+
+1. **Dune exporters** (13) — `--dune --parallel 4` (`--skip-validation` if `SKIP_PG_VALIDATION=true`)
+2. **DRep profile** — `--internal drep_profile --date {yesterday}`
+3. **Off-chain pool data** — `--external off_chain_pool_data` (incremental, watermark-driven)
+4. **DRep dist enriched** — `--hybrid drep_dist_enriched`
+5. **CloudFront manifest** — `update-manifest.sh` (lists S3 parquet files, writes `cloudfront_manifest.json`)
+
+### Notifications
+
+Set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and/or `SLACK_WEBHOOK_URL` in `.env`. The script sends a summary message at the end of each run, and an error message if any step fails (the failing step name is included).
+
+### CloudFront manifest
+
+`update-manifest.sh` lists every parquet file in the S3 bucket and writes a JSON manifest with public URLs. The manifest is uploaded to `s3://{S3_BUCKET}/cloudfront_manifest.json` and is publicly accessible at `https://d1gyygzinbyryv.cloudfront.net/cloudfront_manifest.json`.
+
+### Updating code on a server without git
+
+Use `scripts/update-code.sh` to pull the latest `master` tarball from GitHub, replacing only source/test/script files. `.env`, `uploads.db`, and `exports/` are preserved.
+
+```bash
+~/cardano-dune-analytics/scripts/update-code.sh
+uv sync   # only if dependencies changed
+```
+
 ## Development
 
 ```bash
@@ -637,10 +725,10 @@ src/yaci_s3/
     orchestrator.py      # Main pipeline + retry + external runner
     logging_setup.py     # Structured logging to stderr + file
     external/
-        __init__.py          # External exporter registry
-        base.py              # ExternalExporter ABC (fetch -> write -> upload)
+        __init__.py              # External exporter registry
+        base.py                  # ExternalExporter ABC (fetch -> write -> upload)
         asset_data.py            # Minswap API client + exporter
-        contract_registry.py     # GitHub client + parsers + incremental exporter
+        contract_registry.py     # GitHub client + parsers + incremental exporter (smart_contract_registry)
         off_chain_pool_data.py   # Blockfrost pool metadata (rebuild + incremental)
     internal/
         __init__.py          # Internal job registry
@@ -650,4 +738,14 @@ src/yaci_s3/
         __init__.py          # Hybrid exporter registry
         base.py              # HybridExporter ABC (scan + enrich + upload)
         drep_dist_enriched.py # Join drep_dist with drep_profile
+    validators/
+        __init__.py
+        adapot_koios.py     # Validate adapot supply data against Koios /totals
+scripts/
+    daily-pipeline.sh   # Cron entry point: dune (with retry polling) -> drep_profile -> off_chain_pool_data -> drep_dist_enriched -> manifest
+    run-exporter.sh     # Wrapper for one-off cron jobs (asset_data, smart_contract_registry)
+    update-manifest.sh  # Generate cloudfront_manifest.json (boto3, no aws CLI required)
+    update-code.sh      # Pull latest code via wget tarball (used on servers without git)
+    crontab             # Cron schedule template (edit PROJ_DIR before installing)
+tests/                  # pytest test suite
 ```
