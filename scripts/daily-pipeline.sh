@@ -14,6 +14,12 @@ MAX_RETRIES=12
 RETRY_INTERVAL=600  # 10 minutes
 START_TIME=$(date -u +%s)
 
+# Allow servers without PG access (e.g., dune) to skip PG validation
+SKIP_VALIDATION_FLAG=""
+if [ "${SKIP_PG_VALIDATION:-false}" = "true" ]; then
+    SKIP_VALIDATION_FLAG="--skip-validation"
+fi
+
 notify() {
     local message="$1"
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -36,7 +42,7 @@ duration() {
 
 CURRENT_STEP="starting"
 trap 'notify "❌ *Daily pipeline FAILED* at step: $CURRENT_STEP ($(duration))
-Check logs on UAT"' ERR
+Check logs at $PROJECT_DIR/logs"' ERR
 
 echo "=== $(date -u '+%Y-%m-%d %H:%M:%S UTC') | Starting daily pipeline ==="
 
@@ -46,7 +52,7 @@ DUNE_UPLOADED=0
 DUNE_SUMMARY=""
 for attempt in $(seq 1 $MAX_RETRIES); do
     echo "--- Step 1/4: Dune exporters (attempt $attempt/$MAX_RETRIES) ---"
-    OUTPUT=$(uv run python -m yaci_s3.cli --dune --parallel 4 2>&1)
+    OUTPUT=$(uv run python -m yaci_s3.cli --dune --parallel 4 $SKIP_VALIDATION_FLAG 2>&1)
     echo "$OUTPUT"
 
     # Count uploaded partitions from summary lines
