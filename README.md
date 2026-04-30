@@ -660,22 +660,26 @@ These steps assume Debian/Ubuntu with Python 3.12+ and `curl`/`wget`. If `git` i
     ```bash
     ~/cardano-dune-analytics/scripts/daily-pipeline.sh
     ```
-8. **Install the crontab** (edit `PROJ_DIR` first):
+8. **Install the crontab** (edit `PROJ_DIR` *and* the times for your server's timezone first — see [Cron schedule](#cron-schedule) below):
     ```bash
-    vi ~/cardano-dune-analytics/scripts/crontab   # set PROJ_DIR
+    vi ~/cardano-dune-analytics/scripts/crontab
     crontab ~/cardano-dune-analytics/scripts/crontab
     crontab -l   # verify
     ```
 
 ### Cron schedule
 
-Defined in `scripts/crontab`. Three jobs:
+Defined in `scripts/crontab`. **Times are encoded in server-local timezone** because `CRON_TZ=UTC` is silently ignored on some Debian builds (verified on dune). The committed values target Europe/Zurich (CEST = UTC+2 in summer, CET = UTC+1 in winter); change them when deploying to a server in a different timezone.
 
-| Time (UTC) | Job | Notes |
-|---|---|---|
-| 02:00 daily | `daily-pipeline.sh` | All 5 steps with retry polling. See below. |
-| 06:00 daily | `--external smart_contract_registry` | Independent; checks GitHub for updates. |
-| Every 2h | `--external asset_data` | Independent; fetches Minswap API. |
+Effective UTC times for the dune deployment (CEST):
+
+| Local (CEST) | UTC | Job | Notes |
+|---|---|---|---|
+| 04:00 daily | 02:00 | `daily-pipeline.sh` | All 5 steps with retry polling. Yaci-store writes at 02:00 UTC. |
+| 08:00 daily | 06:00 | `--external smart_contract_registry` | Independent; checks GitHub for updates. |
+| Every 2h (`0 */2`) | every 2h | `--external asset_data` | Independent; fetches Minswap API. |
+
+DST: when CEST falls back to CET in late October, the daily pipeline will fire at 03:00 UTC instead of 02:00 UTC. That's still after the source data is written, just 1h later than ideal — the retry polling absorbs the gap.
 
 ### Daily pipeline (`daily-pipeline.sh`)
 
