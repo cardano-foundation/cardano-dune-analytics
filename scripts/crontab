@@ -2,6 +2,8 @@
 # Install: crontab scripts/crontab
 # Edit PROJ_DIR below to match your installation path.
 
+# Interpret all schedules below in UTC (server may be in a non-UTC tz).
+CRON_TZ=UTC
 PROJ_DIR=/home/kartik/cardano-dune-analytics
 
 # Daily pipeline with retry polling: starts at 02:00 UTC, retries every 10min until new files found
