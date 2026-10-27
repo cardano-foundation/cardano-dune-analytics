@@ -18,6 +18,8 @@ from ..uploader import S3Uploader
 logger = logging.getLogger("yaci_s3.external.asset_data")
 
 MINSWAP_API_URL = "https://api-mainnet-prod.minswap.org/v1/assets/metrics"
+# Minswap rejects limit > 50 with a 400 (observed 2026-10-19).
+PAGE_LIMIT = 50
 HEX56_RE = re.compile(r"^[0-9a-fA-F]{56}$")
 INT32_MAX = (2**31) - 1
 INT32_MIN = -(2**31)
@@ -66,12 +68,13 @@ class MinswapClient:
         Returns a list of asset metric dicts.
         """
         all_assets = []
+        seen = set()
         search_after = None
         page = 0
 
         while True:
             page += 1
-            payload = {"limit": 100, "only_verified": True}
+            payload = {"limit": PAGE_LIMIT, "only_verified": True}
             if search_after is not None:
                 payload["search_after"] = search_after
 
@@ -84,8 +87,15 @@ class MinswapClient:
                 logger.info("Page %d: empty response, pagination complete", page)
                 break
 
-            all_assets.extend(assets)
-            logger.info("Page %d: fetched %d assets (total: %d)", page, len(assets), len(all_assets))
+            # Offset pagination is unstable server-side: the same asset can
+            # appear on several pages, so keep only the first occurrence.
+            for metric in assets:
+                asset = metric.get("asset", {})
+                key = (asset.get("currency_symbol", ""), asset.get("token_name", ""))
+                if key not in seen:
+                    seen.add(key)
+                    all_assets.append(metric)
+            logger.info("Page %d: fetched %d assets (unique total: %d)", page, len(assets), len(all_assets))
 
             search_after = data.get("search_after")
             if search_after is None:
